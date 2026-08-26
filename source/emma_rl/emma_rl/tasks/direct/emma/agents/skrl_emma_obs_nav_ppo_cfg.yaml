@@ -1,0 +1,69 @@
+seed: 42
+
+models:
+  custom: True
+  name: "EmmaNavShared"
+  separate: False
+  policy:
+    class: BetaPolicyMixin
+    min_concentration: 1.0
+    initial_concentration: 2.0
+    action_eps: 1.0e-06
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [256, 128, 64]
+        activations: elu
+    output: "beta(alpha, beta) -> 2 * sample - 1"
+  value:
+    class: DeterministicMixin
+    clip_actions: False
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [256, 128, 64]
+        activations: elu
+    output: ONE
+
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+agent:
+  class: PPO
+  rollouts: 1024
+  learning_epochs: 4
+  mini_batches: 128
+  discount_factor: 0.99
+  gae_lambda: 0.95
+  learning_rate: 3.0e-04
+  # 固定学习率，避免 KLAdaptiveLR 在低 KL 阶段把实际学习率抬高到 7.6e-4。
+  learning_rate_scheduler: null
+  # learning_rate_scheduler: KLAdaptiveLR
+  # learning_rate_scheduler_kwargs:
+  #   kl_threshold: 0.008
+  observation_preprocessor: RunningStandardScaler
+  observation_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+  random_timesteps: 0
+  learning_starts: 0
+  grad_norm_clip: 1.0
+  ratio_clip: 0.2
+  value_clip: 0.2
+  # Beta 策略收敛后只保留弱探索，避免后期 std 和动作抖动重新增大。
+  entropy_loss_scale: 0.008
+  value_loss_scale: 0.25
+  kl_threshold: 0.0
+  rewards_shaper_scale: 0.5
+  time_limit_bootstrap: False
+  experiment:
+    directory: "emma_obs_nav_direct"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+trainer:
+  class: SequentialTrainer
+  timesteps: 500000
+  environment_info: log

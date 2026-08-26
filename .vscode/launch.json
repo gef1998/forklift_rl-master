@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Play Emma-RL-ObsNav-Direct-v0",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/jz/isaacsim/python.sh",
+            "program": "${workspaceFolder}/scripts/skrl/play.py",
+            "args": [
+                "--checkpoint", "logs/skrl/emma_obs_nav_direct/2026-08-04_17-19-08_ppo_torch/checkpoints/agent_150000.pt",
+                "--task", "Emma-RL-ObsNav-Direct-v0",
+                "--num_envs", "1",
+                "--headless"
+            ],
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        },
+    ]
+}

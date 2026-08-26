@@ -1,0 +1,74 @@
+# C++
+**/cmake-build*/
+**/build*/
+**/*.so
+**/*.log*
+
+# Omniverse
+**/*.dmp
+**/.thumbs
+
+# Keep generated USD files out of the repository. Curated runtime assets under
+# assets/ are explicitly included below and stored through Git LFS.
+**/*.usd
+**/*.usda
+**/*.usdc
+**/*.usdz
+!assets/
+!assets/*.usd
+!assets/*.usda
+!assets/*.usdc
+!assets/*.usdz
+
+# Python
+.DS_Store
+**/*.egg-info/
+**/__pycache__/
+**/.pytest_cache/
+**/*.pyc
+**/*.pb
+
+# Docker/Singularity
+**/*.sif
+docker/cluster/exports/
+docker/.container.cfg
+
+# IDE
+**/.idea/
+**/.vscode/
+# Don't ignore the top-level .vscode directory as it is
+# used to configure VS Code settings
+!.vscode
+
+# Outputs
+logs/
+nv_shadercache/
+**/output/*
+**/outputs/*
+**/videos/*
+**/wandb/*
+**/.neptune/*
+docker/artifacts/
+*.tmp
+
+# Doc Outputs
+**/docs/_build/*
+**/generated/*
+
+# Isaac-Sim packman
+_isaac_sim*
+_repo
+_build
+.lastformat
+
+# RL-Games
+**/runs/*
+**/logs/*
+**/recordings/*
+
+# Pre-Trained Checkpoints
+/.pretrained_checkpoints/
+
+# Teleop Recorded Dataset
+datasets
+Agile-Asynch-Nav-main/*

@@ -1,0 +1,88 @@
+seed: 42
+
+# ============================================================================
+# 网络结构 (custom: True, 由 emma_costmap_nav_network.py 控制)
+#
+#   ResNet 编码器:
+#     Stem: Conv(2→16,k3)+BN+ReLU+MaxPool(2)        → 16×32×32
+#     S1:   ResBlock(16→16)+MaxPool(2)               → 16×16×16
+#     S2:   ResBlock(16→32)+MaxPool(2)               → 32×8×8
+#     S3:   ResBlock(32→32)                          → 32×8×8
+#     AdaptiveAvgPool2d(4) → flatten                 → 512
+#
+#   融合 MLP:
+#     cat(512, robot_state(8)) = 520 → 512 → 256 → 128 → 64
+#     ├─ policy: 64 → 2 Sigmoid
+#     └─ value:  64 → 1
+#
+#   总参数: ~280K
+# ============================================================================
+
+models:
+  custom: True
+  name: "EmmaCostmapShared"
+  separate: False
+  policy:
+    class: GaussianMixin
+    clip_actions: False
+    clip_log_std: True
+    min_log_std: -3.0
+    max_log_std: 2.0
+    initial_log_std: -0.5
+    # 以下 network 仅占位, 实际结构见 emma_costmap_nav_network.py
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [128, 64]
+        activations: elu
+    output: sigmoid(ACTIONS)
+  value:
+    class: DeterministicMixin
+    clip_actions: False
+    # 以下 network 仅占位
+    network:
+      - name: net
+        input: OBSERVATIONS
+        layers: [128, 64]
+        activations: elu
+    output: ONE
+
+memory:
+  class: RandomMemory
+  memory_size: -1
+
+agent:
+  class: PPO
+  rollouts: 64
+  learning_epochs: 8
+  mini_batches: 8
+  discount_factor: 0.99
+  gae_lambda: 0.95
+  learning_rate: 1.0e-04
+  learning_rate_scheduler: null
+  learning_rate_scheduler_kwargs:
+    kl_threshold: 0.05
+  observation_preprocessor: RunningStandardScaler
+  observation_preprocessor_kwargs: null
+  value_preprocessor: RunningStandardScaler
+  value_preprocessor_kwargs: null
+  random_timesteps: 0
+  learning_starts: 0
+  grad_norm_clip: 1.0
+  ratio_clip: 0.2
+  value_clip: 0.2
+  entropy_loss_scale: 0.01
+  value_loss_scale: 0.5
+  kl_threshold: 0.0
+  rewards_shaper_scale: 0.5
+  time_limit_bootstrap: False
+  experiment:
+    directory: "emma_costmap_nav_direct"
+    experiment_name: ""
+    write_interval: auto
+    checkpoint_interval: auto
+
+trainer:
+  class: SequentialTrainer
+  timesteps: 300000
+  environment_info: log
