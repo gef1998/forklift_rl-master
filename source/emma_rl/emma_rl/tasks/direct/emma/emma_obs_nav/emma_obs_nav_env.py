@@ -1553,6 +1553,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         sx = self.cfg.lidar_offset_x       # 0.38 (传感器 body x)
         sy = self.cfg.lidar_offset_y       # 0.0
 
+        if not (-hl <= sx <= hl and -hw <= sy <= hw):
+            raise ValueError("LiDAR origin must be inside the robot rectangle")
+            
         inf = torch.full_like(cos_a, float('inf'))
         thresh = 1e-6
 

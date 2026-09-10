@@ -114,7 +114,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     observation_space = single_obs_dim * frame_stack  # 134
     # "initial" 保留原任务的初始距离动态归一化；"lidar_max" 使用固定
     # LiDAR 量程归一化，适合 MPPI 专家监督，避免相同观测比例对应不同米制距离。
-    goal_distance_normalization: str = "initial" 
+    goal_distance_normalization: str = "lidar_max"
 
     # ---- Terrain ----
     # Runtime value is synchronized from the selected world's arena_size.
@@ -154,9 +154,9 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     #     wheel_radius = 0.09 m  (当前 USD 标称值，待实车底盘参数复核)
     #     wheel_base   = 0.40 m  (左右驱动轮横向中心距，不是 0.52 m 车体总宽)
     # ====================================================================
-    wheel_radius: float = 0.09             # m
-    wheel_base: float = 0.40               # m，实际语义为 track width
-    wheel_max_velocity: float = 10.0       # rad/s
+    wheel_radius: float = 0.05             # m
+    wheel_base: float = 0.43               # m，实际语义为 track width
+    wheel_max_velocity: float = 20.0       # rad/s
     # 普通橡胶轮/混凝土地面的各向同性近似。过高摩擦会让差速转向出现粘滑。
     ground_static_friction: float = 0.8
     ground_dynamic_friction: float = 0.6
@@ -317,7 +317,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     lidar_rays_per_sector: int = 12              # 3° / 0.25° = 12
     lidar_max_distance: float = 20.0
     lidar_height: float = 0.12                  # LiDAR 安装高度
-    lidar_offset_x: float = 0.38                # 偏前 (body +X=前进方向)
+    lidar_offset_x: float = 0.0               # 偏前 (body +X=前进方向)
     lidar_offset_y: float = 0.0
     # 策略观测的有效视场。训练默认保持完整 360°；play.py 会覆盖为
     # 前向 ±110°，并将其余盲区填成固定 clearance。
@@ -346,7 +346,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         ),
         ray_alignment="base",
         pattern_cfg=BpearlPatternCfg(
-            horizontal_fov=360.0,
+            horizontal_fov=360.0,                # 0°为正前方，逆时针转
             horizontal_res=0.25,                 # 0.25° 精度 (真实 LiDAR 级别)
             vertical_ray_angles=[0.0],
         ),
