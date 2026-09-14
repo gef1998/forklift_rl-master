@@ -151,20 +151,55 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     #   运动学 (二轮差速):
     #     v_lin  = (ω_L + ω_R) / 2 × wheel_radius
     #     v_ang  = (ω_R - ω_L) / wheel_base × wheel_radius
-    #     wheel_radius = 0.09 m  (当前 USD 标称值，待实车底盘参数复核)
-    #     wheel_base   = 0.40 m  (左右驱动轮横向中心距，不是 0.52 m 车体总宽)
+    #     wheel_radius = 0.05 m  (当前 USD 标称值，待实车底盘参数复核)
+    #     wheel_base   = 0.43 m  (左右驱动轮横向中心距，不是 0.52 m 车体总宽)
     # ====================================================================
     wheel_radius: float = 0.05             # m
     wheel_base: float = 0.43               # m，实际语义为 track width
     wheel_max_velocity: float = 20.0       # rad/s
-    # 普通橡胶轮/混凝土地面的各向同性近似。过高摩擦会让差速转向出现粘滑。
+    # Effective material pairs use min on both sides: drive 0.8/0.6,
+    # chassis 0.5/0.5, caster 0.02/0.02. Use PhysxMaterialAPI, not bare attrs.
     ground_static_friction: float = 0.8
     ground_dynamic_friction: float = 0.6
-    # True：运行时根据上面三项同步直行/原地旋转极限，避免运动学参数漂移。
-    # False：允许设置更低的运营速度限制，例如实车限速 0.2 m/s、0.2 rad/s。
+    # 驱动轮材质。PhysX 用接触双方材质合成摩擦系数; 轮子若没有材质就退化成
+    # PhysX 默认值 (~0.5), 低于配置值, 所以两侧都必须显式给材质。
+    wheel_static_friction: float = 1.2
+    wheel_dynamic_friction: float = 1.0
+    # Chassis contact is retained for tipped configurations.
+    base_static_friction: float = 0.5
+    base_dynamic_friction: float = 0.5
+    # Fixed-heading passive rollers retain lateral friction. Navigation proxies
+    # bias support toward the drive wheels. See the report for legacy sweeps.
+    caster_static_friction: float = 0.02
+    caster_dynamic_friction: float = 0.02
+
+    # ---- Drive/contact model (see docs/emma_drive_diagnostics.md) ----
+    # Separate collision proxies preserve visible tires and link inertias.
+    # Navigation approximation, not a calibrated tire/suspension model.
+    # Legacy reproduction: cylinder, None, False, acceleration limits disabled.
+    drive_wheel_collision_shape: str = "sphere"
+    caster_collision_radius: float | None = 0.0395
+    drive_enable_external_forces_every_iteration: bool = True
+
+    # Implicit velocity drive: reported wheel speed can differ from joint angle
+    # increments. Do not infer actual motor torque from damping * error.
+    wheel_velocity_damping: float = 200.0
+    wheel_effort_limit: float = 4.15
+
+    # Nominal command slew limits; safety braking retains priority.
+    # Substeps interpolate commands. These are not hard bounds on measured
+    # acceleration during collision impulses or initial settling.
+    enable_motion_acceleration_limits: bool = False
+    max_linear_acceleration: float = 1.0   # m/s^2
+    max_angular_acceleration: float = 2.0  # rad/s^2
+    # Command headroom for measured tracking overshoot (settled start/reversal).
+    # Keep the hardware specifications above distinct from this calibration.
+    linear_acceleration_command_scale: float = 0.90
+    angular_acceleration_command_scale: float = 0.94
+
     sync_body_velocity_limits_to_wheels: bool = False
     max_linear_velocity: float = 0.9
-    max_angular_velocity: float = 2.0
+    max_angular_velocity: float = 1.5
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
     robot_half_length: float = 0.42        # 0.4115m physical half-length + safety margin
@@ -177,8 +212,10 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
             usd_path=_EMMA_USD,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
-                solver_position_iteration_count=4,
-                solver_velocity_iteration_count=2,
+                # Keep 8/4: the contact-model correction avoids doubling the
+                # position iterations. Benchmark results are recorded in docs.
+                solver_position_iteration_count=8,
+                solver_velocity_iteration_count=4,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
@@ -191,23 +228,20 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
                 velocity_limit=wheel_max_velocity,
                 velocity_limit_sim=wheel_max_velocity,
                 stiffness=0.0,
-                damping=4.05,
+                damping=wheel_velocity_damping,
+                # 隐式执行器上 effort_limit_sim 与 effort_limit 等价, 用前者。
+                effort_limit_sim=wheel_effort_limit,
             ),
             "wheel_right_actuator": ImplicitActuatorCfg(
                 joint_names_expr=["wheel_right"],
                 velocity_limit=wheel_max_velocity,
                 velocity_limit_sim=wheel_max_velocity,
                 stiffness=0.0,
-                damping=4.05,
+                damping=wheel_velocity_damping,
+                effort_limit_sim=wheel_effort_limit,
             ),
-            # "lift_joint_actuator": ImplicitActuatorCfg(
-            #     joint_names_expr=["lift_joint"],
-            #     velocity_limit=0.0,           # 锁死
-            #     velocity_limit_sim=0.0,
-            #     stiffness=None,
-            #     damping=None,
-            # ),
-    # lift_joint 不在 dof_names 中, 由 init_state joint_pos 固定为 0
+            # Lift and caster joints retain their USD properties; only the
+            # two drive wheels are controlled by these actuator groups.
         },
     )
     dof_names = ("wheel_left", "wheel_right")

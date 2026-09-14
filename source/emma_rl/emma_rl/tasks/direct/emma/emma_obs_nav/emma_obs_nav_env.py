@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 import math
+import os
 import random
 import torch
 
@@ -34,6 +35,7 @@ from .action_control import (
     actions_to_raw_wheel_velocities,
     differential_drive_kinematic_limits,
     normalize_action_control_mode,
+    limit_wheel_velocity_acceleration,
     project_wheel_velocities_to_motion_limits,
     wheel_velocities_to_body_twist,
 )
@@ -49,6 +51,7 @@ from .async_lidar import (
     warp_cached_ranges_and_clearances,
 )
 from .emma_obs_nav_env_cfg import EmmaObsNavEnvCfg
+from .drive_contacts import configure_drive_contacts
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
 from .navigation_rewards import (
     action_jitter_penalty,
@@ -77,6 +80,10 @@ class EmmaObsNavEnv(DirectRLEnv):
     cfg: EmmaObsNavEnvCfg
 
     def __init__(self, cfg: EmmaObsNavEnvCfg, render_mode: str | None = None, **kwargs):
+        for name in ("linear_acceleration_command_scale", "angular_acceleration_command_scale"):
+            value = getattr(cfg, name)
+            if not math.isfinite(value) or not 0.0 < value <= 1.0:
+                raise ValueError(f"{name} must be in (0, 1]")
         # 必须在 super().__init__() 之前设置 (因为 _setup_scene 在 super 内调用)
         self._world_mode = cfg.world_mode.strip().lower()
         if self._world_mode not in ("random_obstacles", "ring", "warehouse"):
@@ -145,7 +152,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             robot_half_diagonal = math.hypot(
                 cfg.robot_half_length, cfg.robot_half_width
             )
-            if random_world_cfg.num_obstacles <= 0:
+            if random_world_cfg.num_obstacles < 0:
                 raise ValueError(
                     "random_obstacles num_obstacles must be positive"
                 )
@@ -225,7 +232,10 @@ class EmmaObsNavEnv(DirectRLEnv):
             f"braking_boundary@vmax={max_braking_boundary:.3f}m"
         )
 
-        # ---- Joint indices (wheel_left=0, wheel_right=1, lift_joint=2 unused) ----
+        # ---- Joint indices ----
+        # 按名字解析, 与 DOF 总数无关。当前 articulation 有 7 个 DOF:
+        # wheel_left / wheel_right (驱动) + lift_joint + 4 个脚轮转动副, 后五个
+        # 都没有 actuator (脚轮关节在 USD 里也没有 DriveAPI, 保持自由滚动)。
         jn = list(self.cfg.dof_names)
         self.left_ids, _ = self.robot.find_joints(jn[0])   # wheel_left
         self.right_ids, _ = self.robot.find_joints(jn[1])  # wheel_right
@@ -317,6 +327,10 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._raw_wheel_vel_cmd = torch.zeros_like(self.actions)
         self._feasible_wheel_vel_cmd = torch.zeros_like(self.actions)
         self._wheel_vel_cmd = torch.zeros_like(self.actions)
+        self._wheel_target_start = torch.zeros_like(self.actions)
+        self._joint_vel_cmd = torch.zeros_like(self.actions)
+        self._action_substep = 0
+        self._wheel_acceleration_scale = torch.ones(self.num_envs, device=self.device)
         self._wheel_projection_scale = torch.ones(self.num_envs, device=self.device)
         self._requested_body_twist_cmd = torch.zeros_like(self.actions)
         self._projected_body_twist_cmd = torch.zeros_like(self.actions)
@@ -599,6 +613,67 @@ class EmmaObsNavEnv(DirectRLEnv):
     # ==================================================================
     # Scene setup
     # ==================================================================
+    @staticmethod
+    def _bind_friction_material(
+        stage, mat_path, static_friction, dynamic_friction,
+        root_paths, label, path_filter=None, combine_mode=None,
+    ):
+        """在 ``root_paths`` 下所有碰撞体上直接绑定一个显式物理材质。
+
+        直接绑到 collider prim 本身(而不是父节点), 因为 USD 材质绑定的继承
+        在 PhysX 解析时不可靠 —— 绑在父 Xform 上会被静默丢弃。返回绑定的
+        碰撞体数量, 便于确认 cm 路径真的命中了。
+
+        Args:
+            mat_path: 材质 prim 路径, 不存在则创建。
+            root_paths: 要遍历的 USD prim 子树。
+            path_filter: 只在路径包含该子串时绑定(例如 ``"/dwheel"``)。
+            combine_mode: PhysX 摩擦合成模式 (min/max/average/multiply)。
+                默认 None 保持 PhysX 的 average —— 注意 average 会把低摩擦
+                的一侧拉向高摩擦的一侧 (轮子 0.05 配地面 0.8 等效 0.4), 所以
+                想真正压低摩擦必须显式设 "min"。
+        """
+        from pxr import Usd, UsdPhysics, UsdShade
+
+        mat_prim = stage.GetPrimAtPath(mat_path)
+        if not mat_prim or not mat_prim.IsValid():
+            mat_prim = UsdShade.Material.Define(stage, mat_path).GetPrim()
+        mat_api = UsdPhysics.MaterialAPI.Apply(mat_prim)
+        mat_api.CreateStaticFrictionAttr().Set(float(static_friction))
+        mat_api.CreateDynamicFrictionAttr().Set(float(dynamic_friction))
+        mat_api.CreateRestitutionAttr().Set(0.0)
+        if combine_mode is not None:
+            # 必须走 PhysxMaterialAPI, 不能只是裸写一个 physxMaterial:... 属性:
+            # 没挂 schema 时 PhysX 的 USD 解析器会直接忽略它, 表现就是"改了
+            # combine_mode 但结果逐字节不变" (实测地面 average -> min 完全没有
+            # 影响仿真的任何一位)。而且材质对里 PhysX 只采用其中一侧的模式,
+            # 所以两侧材质都要设。
+            from pxr import PhysxSchema
+            physx_mat_api = PhysxSchema.PhysxMaterialAPI.Apply(mat_prim)
+            physx_mat_api.CreateFrictionCombineModeAttr().Set(combine_mode)
+        material = UsdShade.Material(mat_prim)
+
+        bound = 0
+        for root in root_paths:
+            root_prim = stage.GetPrimAtPath(root)
+            if not root_prim or not root_prim.IsValid():
+                print(f"[Friction] {label}: 找不到 {root}, 跳过")
+                continue
+            for prim in Usd.PrimRange(root_prim):
+                if not prim.HasAPI(UsdPhysics.CollisionAPI):
+                    continue
+                if path_filter and path_filter not in str(prim.GetPath()):
+                    continue
+                UsdShade.MaterialBindingAPI.Apply(prim).Bind(
+                    material, UsdShade.Tokens.strongerThanDescendants)
+                bound += 1
+        print(
+            f"[Friction] {label}: {bound} collider(s) -> {mat_path} "
+            f"(static={static_friction}, dynamic={dynamic_friction}"
+            + (f", combine={combine_mode}" if combine_mode else "") + ")"
+        )
+        return bound
+
     def _setup_scene(self):
         """构建场景: 平地 + 障碍物 + Emma + 目标标记."""
         # Ground
@@ -606,29 +681,17 @@ class EmmaObsNavEnv(DirectRLEnv):
             color=(0.1, 0.1, 0.1),
         ))
 
-        # 给地面加高摩擦力物理材质 (修复轮子打滑)
-        from pxr import UsdPhysics, UsdShade, Sdf
+        # Bind explicitly to colliders and apply PhysxMaterialAPI. Both sides
+        # use min for clarity. PhysX chooses the higher-priority combine mode
+        # (average < min < multiply < max); an average partner cannot override
+        # a correctly authored min. The earlier bug was a missing API schema.
         import omni.usd
         stage = omni.usd.get_context().get_stage()
-        mat_path = "/World/groundPlane/physxMaterial"
-        if not stage.GetPrimAtPath(mat_path):
-            UsdShade.Material.Define(stage, mat_path)
-        physx_mat = UsdPhysics.MaterialAPI.Apply(stage.GetPrimAtPath(mat_path))
-        physx_mat.CreateStaticFrictionAttr().Set(self.cfg.ground_static_friction)
-        physx_mat.CreateDynamicFrictionAttr().Set(self.cfg.ground_dynamic_friction)
-        physx_mat.CreateRestitutionAttr().Set(0.0)
-        # 绑定到 groundPlane
-        try:
-            UsdPhysics.MaterialAPI.Apply(stage.GetPrimAtPath("/World/groundPlane"))
-        except Exception:
-            pass  # 可能已有
-        mat_binding = UsdShade.MaterialBindingAPI.Apply(
-            stage.GetPrimAtPath("/World/groundPlane"))
-        mat_binding.GetDirectBindingRel().SetTargets([Sdf.Path(mat_path)])
-        print(
-            "[Ground] physics material applied: "
-            f"friction={self.cfg.ground_static_friction}/"
-            f"{self.cfg.ground_dynamic_friction}"
+        self._bind_friction_material(
+            stage, "/World/PhysicsMaterials/Ground",
+            self.cfg.ground_static_friction,
+            self.cfg.ground_dynamic_friction,
+            ("/World/groundPlane",), "ground", combine_mode="min",
         )
 
         if self._world_mode == "warehouse":
@@ -679,6 +742,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             obstacle_count = self.cfg.obs_world.num_obstacles + 8
 
         self.robot = Articulation(self.cfg.robot_cfg)
+        configure_drive_contacts(stage, "/World/envs/env_0/Robot/EMMA400K_body", self.cfg)
 
         goal_marker_cfg = RigidObjectCfg(
             prim_path="/World/envs/env_.*/GoalMarker",
@@ -697,7 +761,59 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         self.scene.clone_environments(copy_from_source=False)
 
+        # 驱动轮材质 —— 必须在 clone_environments 之后遍历所有 env, 因为每个
+        # env 的轮子 collider 是独立 prim。车身 convexHull / lift 保持默认,
+        # 避免底盘蹭地时被大摩擦粘住。
+        self._bind_friction_material(
+            stage, "/World/PhysicsMaterials/Wheel",
+            self.cfg.wheel_static_friction,
+            self.cfg.wheel_dynamic_friction,
+            ("/World/envs",), "wheel", path_filter="/dwheel",
+        )
+
+        # 车身支撑接触。加脚轮之前 base_link 的 convexHull 就是第三个支撑点
+        # (实测 ~69 N 法向力), 它没有材质时退化成 PhysX 默认摩擦, 直线白吃
+        # ~16 N 阻力、转向还要带车体在地面横向刮擦。现在车由 4 个脚轮撑着,
+        # base_link 正常工况不碰地, 这里保留材质只为兜底; combine=min 是必须的,
+        # 否则会被地面的 0.8 平均回去。lift 不绑 (保持默认), 它在 z≈0.26。
+        self._bind_friction_material(
+            stage, "/World/PhysicsMaterials/Base",
+            self.cfg.base_static_friction,
+            self.cfg.base_dynamic_friction,
+            ("/World/envs",), "base", path_filter="/base_link/",
+            combine_mode="min",
+        )
+
+        # 脚轮材质。脚轮在 USD 里是"圆柱碰撞 + 无驱动转动副" (见
+        # assets/Emma_no_ground.usd 的 caster_fl/fr/rl/rr), 沿行进方向是纯滚动,
+        # 没有切向阻力; 但原地转向时它必须能横向侧滑 (真机靠万向回转, 这里没有
+        # 回转副), 所以侧向也按低摩擦近似, 同样用 combine=min。
+        self._bind_friction_material(
+            stage, "/World/PhysicsMaterials/Caster",
+            self.cfg.caster_static_friction,
+            self.cfg.caster_dynamic_friction,
+            ("/World/envs",), "caster", path_filter="/caster",
+            combine_mode="min",
+        )
+
         self.scene.articulations["robot"] = self.robot
+
+        # TEMP DEBUG: contact sensor on wheel links.
+        # 默认关闭 (逐 physics substep 打印会把日志刷爆); 需要时
+        # EMMA_DRIVE_DEBUG=1 启动即可打开。
+        self._drive_debug = os.environ.get("EMMA_DRIVE_DEBUG", "0") == "1"
+        if self._drive_debug:
+            from pxr import PhysxSchema
+            for _lp in ("base_link", "dwheel_left", "dwheel_right", "lift"):
+                _prim = stage.GetPrimAtPath(f"/World/envs/env_0/Robot/EMMA400K_body/{_lp}")
+                if _prim.IsValid():
+                    PhysxSchema.PhysxContactReportAPI.Apply(_prim)
+            from isaaclab.sensors import ContactSensorCfg, ContactSensor
+            self._dbg_contact = ContactSensor(ContactSensorCfg(
+                prim_path="/World/envs/env_.*/Robot/EMMA400K_body/.*",
+                update_period=0.0, history_length=1, debug_vis=False,
+            ))
+            self.scene.sensors["dbg_contact"] = self._dbg_contact
 
         if self._world_mode == "warehouse":
             # 圆柱 RigidObject 注册
@@ -942,6 +1058,21 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._dr_wheel_r_scale[:n],
         )
 
+        # Limit nominal acceleration before the shield. Its braking/emergency
+        # decisions retain priority over motion smoothing.
+        if cfg.enable_motion_acceleration_limits:
+            limited_wheels, acceleration_scale = limit_wheel_velocity_acceleration(
+                feasible_wheels, self._wheel_vel_cmd[:n], self.step_dt,
+                cfg.wheel_radius, cfg.wheel_base,
+                cfg.max_linear_acceleration * cfg.linear_acceleration_command_scale,
+                cfg.max_angular_acceleration * cfg.angular_acceleration_command_scale,
+                self._dr_wheel_r_scale[:n],
+            )
+        else:
+            limited_wheels = feasible_wheels
+            acceleration_scale = torch.ones_like(projection_scale)
+        self._wheel_acceleration_scale[:n] = acceleration_scale
+
         safety_cfg = cfg.safety_control
         reaction_time = (
             safety_cfg.controller_latency_s
@@ -949,7 +1080,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             + self._dr_action_delay[:n].to(dtype=raw_wheels.dtype) * self.step_dt
         )
         wheel_targets, safety_diag = apply_safety_control(
-            feasible_wheels,
+            limited_wheels,
             self._shield_clearance[:n],
             self._lidar_sector_angles[:n],
             self._shield_aoi[:n],
@@ -972,7 +1103,8 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         self._raw_wheel_vel_cmd[:n] = raw_wheels
         self._feasible_wheel_vel_cmd[:n] = feasible_wheels
-        self._wheel_vel_cmd[:n] = wheel_targets
+        self._wheel_target_start.copy_(self._wheel_vel_cmd)
+        self._action_substep = 0
         self._wheel_projection_scale[:n] = projection_scale
         self._requested_body_twist_cmd[:n] = wheel_velocities_to_body_twist(
             raw_wheels,
@@ -1008,12 +1140,53 @@ class EmmaObsNavEnv(DirectRLEnv):
         """每 physics substep: 写入 joint velocity targets."""
         if not hasattr(self, '_joint_vel_cmd') or self._joint_vel_cmd is None:
             return
+        self._action_substep += 1
+        if self.cfg.enable_motion_acceleration_limits:
+            fraction = min(self._action_substep / self.cfg.decimation, 1.0)
+            interpolated = self._wheel_target_start + fraction * (
+                self._joint_vel_cmd - self._wheel_target_start
+            )
+            # Never interpolate back toward an older, faster command when the
+            # shield has intervened (including stale-scan emergency stops).
+            applied = torch.where(
+                self._safety_intervened.unsqueeze(-1), self._joint_vel_cmd, interpolated
+            )
+        else:
+            applied = self._joint_vel_cmd
+        self._wheel_vel_cmd.copy_(applied)
         self.robot.set_joint_velocity_target(
-            self._joint_vel_cmd[:, 0:1], joint_ids=self.left_ids,
+            applied[:, 0:1], joint_ids=self.left_ids,
         )
         self.robot.set_joint_velocity_target(
-            self._joint_vel_cmd[:, 1:2], joint_ids=self.right_ids,
+            applied[:, 1:2], joint_ids=self.right_ids,
         )
+        # print("drive_vel left: ", self.robot.data.joint_vel[:, self.left_ids])
+        # print("drive_vel right: ", self.robot.data.joint_vel[:, self.right_ids])
+        # print("dbg: root_lin_vel", self.robot.data.root_lin_vel_w[0],
+        #       "body_names", self.robot.data.body_names[:4])
+        # print("dbg: root_ang_vel", self.robot.data.root_ang_vel_w[0])
+
+
+        if not self._drive_debug:
+            return
+        print("dbg: root_lin_vel", self.robot.data.root_lin_vel_w[0],
+              "body_names", self.robot.data.body_names[:4])
+        print("dbg: root_ang_vel", self.robot.data.root_ang_vel_w[0])
+        cf = self._dbg_contact.data.net_forces_w
+        if cf is not None:
+            print("dbg: contact_net_forces", self._dbg_contact.body_names, "\n", cf[0])
+        print("dbg: estimated_pd_torque", self.robot.data.applied_torque[0, :2])
+        print("dbg: effort_limit", self.robot.actuators["wheel_left_actuator"].effort_limit[0])
+        print("dbg: sim effort_limits", self.robot.data.joint_effort_limits[0])
+        print("dbg: sim vel_target", self.robot.data.joint_vel_target[0])
+        print("dbg: external_effort_input", self.robot.root_physx_view.get_dof_actuation_forces()[0])
+        print("dbg: max_forces", self.robot.root_physx_view.get_dof_max_forces()[0])
+        print("dbg: joint_stiffness", self.robot.data.joint_stiffness[0])
+        print("dbg: joint_damping", self.robot.data.joint_damping[0])
+        print("dbg: root_pos_z", self.robot.data.root_pos_w[0, 2].item(),
+              "up_z", self.robot.data.projected_gravity_b[0])
+        print("dbg: wheel_pos_z", self.robot.data.body_pos_w[0, [self.robot.find_bodies("dwheel_left")[0][0]], 2])
+
 
     # ==================================================================
     # Observation — 130 dims (120 LiDAR + 2 goal_dir + 1 goal_dist + 3 IMU + 4 time)
@@ -2268,6 +2441,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._raw_wheel_vel_cmd[env_ids] = 0.0
         self._feasible_wheel_vel_cmd[env_ids] = 0.0
         self._wheel_vel_cmd[env_ids] = 0.0
+        self._wheel_target_start[env_ids] = 0.0
+        self._joint_vel_cmd[env_ids] = 0.0
+        self._wheel_acceleration_scale[env_ids] = 1.0
         self._wheel_projection_scale[env_ids] = 1.0
         self._requested_body_twist_cmd[env_ids] = 0.0
         self._projected_body_twist_cmd[env_ids] = 0.0

@@ -1,0 +1,500 @@
+{
+  "date": "2026-09-12",
+  "repository": "/home/jz/cqz/forklift_rl-master",
+  "backup": "/home/jz/cqz/emma-drive-backup-20260911-0CFUYw",
+  "final_drive_config": {
+    "drive_wheel_collision_shape": "sphere",
+    "caster_collision_radius": 0.0395,
+    "drive_enable_external_forces_every_iteration": true,
+    "enable_motion_acceleration_limits": true,
+    "max_linear_acceleration": 1.0,
+    "max_angular_acceleration": 2.0,
+    "linear_acceleration_command_scale": 0.9,
+    "angular_acceleration_command_scale": 0.94
+  },
+  "solver_position_velocity_iterations": [
+    8,
+    4
+  ],
+  "wheel_effort_limit_Nm": 4.15,
+  "wheel_velocity_damping": 200.0,
+  "validation": {
+    "action_control_tests_passed": 10,
+    "safety_control_tests_passed": 11
+  },
+  "cases": {
+    "calibrated_low_smoke": {
+      "args": {
+        "target": 1.0,
+        "turn": true,
+        "steps": 300,
+        "settle": 0.5,
+        "reverse_at": null,
+        "num_envs": 4,
+        "legacy": false,
+        "no_acceleration_limits": false,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": true,
+        "smoke": true,
+        "benchmark": false,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/calibrated_low_smoke.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "checks": {
+        "proxies_cloned_visuals_preserved": true,
+        "nominal_command_slew_bounds": true,
+        "shield_stops_without_interpolation_delay": true,
+        "reset_clears_only_selected_env_commands": true
+      },
+      "summary": {
+        "yaw_mean": -0.22680476589582452,
+        "tracking_pct": 97.52604933520453,
+        "forward_mean": -0.00017080077671366848,
+        "wheel_mean": [
+          1.0009339923289284,
+          -1.0558728605360534
+        ],
+        "wheel_sd": [
+          0.09939558207435657,
+          0.1624408059097349
+        ],
+        "measured_peak_acceleration": [
+          0.010244491932098759,
+          0.9193886071443562
+        ],
+        "command_peak_acceleration": [
+          0.0,
+          1.8800011900968328
+        ]
+      },
+      "trace_file": "calibrated_low_smoke.json"
+    },
+    "calibrated_turn": {
+      "args": {
+        "target": 6.45,
+        "turn": true,
+        "steps": 300,
+        "settle": 0.5,
+        "reverse_at": null,
+        "num_envs": 1,
+        "legacy": false,
+        "no_acceleration_limits": false,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": true,
+        "smoke": false,
+        "benchmark": false,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/calibrated_turn.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "checks": {
+        "proxies_cloned_visuals_preserved": true,
+        "nominal_command_slew_bounds": true
+      },
+      "summary": {
+        "yaw_mean": -1.4875347810005075,
+        "tracking_pct": 99.16898540003383,
+        "forward_mean": -0.0013596248825715476,
+        "wheel_mean": [
+          6.2406861390640485,
+          -6.256672631448774
+        ],
+        "wheel_sd": [
+          0.0009755582187864109,
+          0.000796237357101331
+        ],
+        "measured_peak_acceleration": [
+          0.043832157825818306,
+          1.8838763236999494
+        ],
+        "command_peak_acceleration": [
+          0.0,
+          1.8800025762513715
+        ]
+      },
+      "trace_file": "calibrated_turn.json"
+    },
+    "calibrated_reverse": {
+      "args": {
+        "target": 6.45,
+        "turn": true,
+        "steps": 350,
+        "settle": 0.5,
+        "reverse_at": 3.0,
+        "num_envs": 1,
+        "legacy": false,
+        "no_acceleration_limits": false,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": true,
+        "smoke": false,
+        "benchmark": false,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/calibrated_reverse.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "checks": {
+        "proxies_cloned_visuals_preserved": true,
+        "nominal_command_slew_bounds": true
+      },
+      "summary": {
+        "yaw_mean": 1.4841553026170873,
+        "tracking_pct": 98.94368684113915,
+        "forward_mean": 0.000287442063693819,
+        "wheel_mean": [
+          -6.1659236452472745,
+          6.2913618325000975
+        ],
+        "wheel_sd": [
+          0.04455274187723196,
+          0.03665471178275679
+        ],
+        "measured_peak_acceleration": [
+          0.043832157825818306,
+          1.9307762384415084
+        ],
+        "command_peak_acceleration": [
+          0.0,
+          1.880002576251403
+        ]
+      },
+      "trace_file": "calibrated_reverse.json"
+    },
+    "reverse_scale90": {
+      "args": {
+        "target": 18.0,
+        "turn": false,
+        "steps": 350,
+        "settle": 0.5,
+        "reverse_at": 2.0,
+        "num_envs": 1,
+        "legacy": false,
+        "no_acceleration_limits": false,
+        "linear_command_scale": 0.9,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": true,
+        "smoke": false,
+        "benchmark": false,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/reverse_scale90.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "drive_config": {
+        "drive_wheel_collision_shape": "sphere",
+        "caster_collision_radius": 0.0395,
+        "drive_enable_external_forces_every_iteration": true,
+        "enable_motion_acceleration_limits": true,
+        "max_linear_acceleration": 1.0,
+        "max_angular_acceleration": 2.0,
+        "linear_acceleration_command_scale": 0.9,
+        "angular_acceleration_command_scale": 0.94
+      },
+      "checks": {
+        "proxies_cloned_visuals_preserved": true,
+        "nominal_command_slew_bounds": true
+      },
+      "summary": {
+        "yaw_mean": 0.00018728283637629552,
+        "tracking_pct": null,
+        "forward_mean": -0.8999991547408982,
+        "wheel_mean": [
+          -17.920513712944675,
+          -17.943573652808347
+        ],
+        "wheel_sd": [
+          0.0009869736023999727,
+          0.0016825676942755705
+        ],
+        "measured_peak_acceleration": [
+          0.9528147056699002,
+          0.15339446545113206
+        ],
+        "command_peak_acceleration": [
+          0.9000015258789255,
+          0.0
+        ]
+      },
+      "trace_file": "reverse_scale90.json"
+    },
+    "release_straight": {
+      "args": {
+        "target": 18.0,
+        "turn": false,
+        "steps": 200,
+        "settle": 0.5,
+        "reverse_at": null,
+        "num_envs": 1,
+        "legacy": false,
+        "no_acceleration_limits": false,
+        "linear_command_scale": null,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": true,
+        "smoke": false,
+        "benchmark": false,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/release_straight.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "drive_config": {
+        "drive_wheel_collision_shape": "sphere",
+        "caster_collision_radius": 0.0395,
+        "drive_enable_external_forces_every_iteration": true,
+        "enable_motion_acceleration_limits": true,
+        "max_linear_acceleration": 1.0,
+        "max_angular_acceleration": 2.0,
+        "linear_acceleration_command_scale": 0.9,
+        "angular_acceleration_command_scale": 0.94
+      },
+      "checks": {
+        "proxies_cloned_visuals_preserved": true,
+        "nominal_command_slew_bounds": true
+      },
+      "summary": {
+        "yaw_mean": -0.0002534801505456229,
+        "tracking_pct": null,
+        "forward_mean": 0.8998632318344876,
+        "wheel_mean": [
+          18.050944503860094,
+          18.077830271934396
+        ],
+        "wheel_sd": [
+          0.0006178340099156087,
+          0.0005281050569758181
+        ],
+        "measured_peak_acceleration": [
+          0.9051382541656486,
+          0.10225113655906161
+        ],
+        "command_peak_acceleration": [
+          0.9000015258789105,
+          0.0
+        ]
+      },
+      "trace_file": "release_straight.json"
+    },
+    "bench_legacy84": {
+      "args": {
+        "target": 1.0,
+        "turn": true,
+        "steps": 300,
+        "settle": 0.5,
+        "reverse_at": null,
+        "num_envs": 1024,
+        "legacy": true,
+        "no_acceleration_limits": false,
+        "linear_command_scale": null,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": false,
+        "smoke": false,
+        "benchmark": true,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/bench_legacy84.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "drive_config": {
+        "drive_wheel_collision_shape": "cylinder",
+        "caster_collision_radius": null,
+        "drive_enable_external_forces_every_iteration": false,
+        "enable_motion_acceleration_limits": false,
+        "max_linear_acceleration": 1.0,
+        "max_angular_acceleration": 2.0,
+        "linear_acceleration_command_scale": 0.9,
+        "angular_acceleration_command_scale": 0.94
+      },
+      "checks": {},
+      "summary": {
+        "seconds": 4.1487610545009375,
+        "env_steps_per_second": 74046.20221902698
+      },
+      "trace_file": "bench_legacy84.json"
+    },
+    "bench_new84": {
+      "args": {
+        "target": 1.0,
+        "turn": true,
+        "steps": 300,
+        "settle": 0.5,
+        "reverse_at": null,
+        "num_envs": 1024,
+        "legacy": false,
+        "no_acceleration_limits": false,
+        "linear_command_scale": null,
+        "effort_limit": 4.15,
+        "pos_iters": 8,
+        "vel_iters": 4,
+        "contacts": false,
+        "smoke": false,
+        "benchmark": true,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/bench_new84.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "drive_config": {
+        "drive_wheel_collision_shape": "sphere",
+        "caster_collision_radius": 0.0395,
+        "drive_enable_external_forces_every_iteration": true,
+        "enable_motion_acceleration_limits": true,
+        "max_linear_acceleration": 1.0,
+        "max_angular_acceleration": 2.0,
+        "linear_acceleration_command_scale": 0.9,
+        "angular_acceleration_command_scale": 0.94
+      },
+      "checks": {
+        "proxies_cloned_visuals_preserved": true
+      },
+      "summary": {
+        "seconds": 4.269425245001912,
+        "env_steps_per_second": 71953.47906831952
+      },
+      "trace_file": "bench_new84.json"
+    },
+    "bench_legacy164": {
+      "args": {
+        "target": 1.0,
+        "turn": true,
+        "steps": 300,
+        "settle": 0.5,
+        "reverse_at": null,
+        "num_envs": 1024,
+        "legacy": true,
+        "no_acceleration_limits": false,
+        "linear_command_scale": null,
+        "effort_limit": 4.15,
+        "pos_iters": 16,
+        "vel_iters": 4,
+        "contacts": false,
+        "smoke": false,
+        "benchmark": true,
+        "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/bench_legacy164.json",
+        "device": "cuda:0",
+        "cpu": false,
+        "verbose": false,
+        "info": false,
+        "rendering_mode": null,
+        "kit_args": "",
+        "headless": true,
+        "hide_ui": true,
+        "create_new_stage": false,
+        "physics_gpu": 0,
+        "active_gpu": 0
+      },
+      "drive_config": {
+        "drive_wheel_collision_shape": "cylinder",
+        "caster_collision_radius": null,
+        "drive_enable_external_forces_every_iteration": false,
+        "enable_motion_acceleration_limits": false,
+        "max_linear_acceleration": 1.0,
+        "max_angular_acceleration": 2.0,
+        "linear_acceleration_command_scale": 0.9,
+        "angular_acceleration_command_scale": 0.94
+      },
+      "checks": {},
+      "summary": {
+        "seconds": 4.676391555927694,
+        "env_steps_per_second": 65691.67622642715
+      },
+      "trace_file": "bench_legacy164.json"
+    }
+  },
+  "provenance_notes": [
+    "calibrated_low_smoke/turn/reverse were recorded with linear command scale 0.995 and angular scale 0.94; requested linear velocity is zero for these pure-turn cases, so the linear scale does not limit their commands.",
+    "reverse_scale90 used the explicit linear-command-scale 0.90 override; this is now the default. release_straight and all throughput cases were run with the final source defaults.",
+    "Some intermediate traces predate embedded drive_config metadata; retain these notes and original args alongside the traces.",
+    "Legacy benchmark disables new contact proxies, external-forces-every-iteration, and nominal acceleration limiting. The updated safety code and other task code are shared."
+  ],
+  "throughput_comparison": {
+    "new_vs_legacy84_percent": -2.8262396827824277,
+    "new_vs_legacy164_percent": 9.53211000478824,
+    "scope": "Sequential same-host 1024-env runs, 40 warmup and 300 timed control steps; other pre-existing GPU workloads were left running. Single runs, not a confidence interval."
+  },
+  "limitations": [
+    "Nominal command slew limits do not guarantee physical acceleration bounds under collision, emergency braking, arbitrary load, terrain, or randomized states.",
+    "The collision proxies are a navigation approximation; real caster suspension, tire shape and drive-wheel preload have not been calibrated.",
+    "No policy retraining or checkpoint replacement was performed."
+  ],
+  "source_sha256": {
+    "source/emma_rl/emma_rl/tasks/direct/emma/emma_obs_nav/action_control.py": "5215d35ac1c9c5d240ba1a46555fb6453fba9570f7b8c70ef8c792ad69d5e6ec",
+    "source/emma_rl/emma_rl/tasks/direct/emma/emma_obs_nav/drive_contacts.py": "09810c2cf97954541e1ad17d322ae98e9b9e3246a8e27b3d8b5c9b1ce756b5d4",
+    "source/emma_rl/emma_rl/tasks/direct/emma/emma_obs_nav/emma_obs_nav_env.py": "e9ab9175f579fe1958e1ee4e81af469f3eb62e800a57c108f5bd3edbbbe6fab0",
+    "source/emma_rl/emma_rl/tasks/direct/emma/emma_obs_nav/emma_obs_nav_env_cfg.py": "ee4967e0fb332e5f23e00e0abcd0688638ad6f3b71abbf82df115c445c128ad4",
+    "source/emma_rl/emma_rl/tasks/direct/emma/emma_obs_nav/safety_control.py": "08f3bd084cefa44c5088610d3847dfa2338ddbf3bc8703cf6dc05a61134e0522",
+    "tests/test_action_control.py": "e2fdaf1298ce505357109425f9d8f158cb80d9d8ca5a93e88d5fbd4d010719a3",
+    "tests/test_safety_control.py": "28dc84fccd612b74f47215b3c6eaa7a331fb50fb20004105879ba1e751ced812",
+    "scripts/diagnostics/probe_emma_drive.py": "4dc790f46fe49b73163440b781947829ce579d72622b0383511ee7d508897556"
+  }
+}

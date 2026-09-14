@@ -190,6 +190,9 @@ def apply_safety_control(
     travel_clearance = torch.where(
         curve_twist[:, 0] < 0.0, rear_clearance, front_clearance
     )
+    travel_covered = torch.where(
+        curve_twist[:, 0] < 0.0, rear_mask.any(dim=-1), front_mask.any(dim=-1)
+    )
 
     obstacle_speed = candidate_wheels.new_tensor(possible_obstacle_speed)
     d_now_lower = travel_clearance - static_margin - obstacle_speed * aoi
@@ -230,6 +233,9 @@ def apply_safety_control(
     )
     emergency = torch.zeros_like(speed, dtype=torch.bool)
     if enabled:
+        # An empty travel cone is unobserved, not infinitely clear. Keep pure
+        # rotation's existing semantics; translational motion must be observed.
+        emergency |= (speed > 1.0e-8) & ~travel_covered
         emergency |= (min_ttc < ttc_stop_s) | (d_now_lower <= 0.0)
         emergency |= aoi > max_lidar_aoi_s
         emergency |= ~finite_inputs

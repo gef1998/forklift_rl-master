@@ -69,7 +69,7 @@ def _ensure_collision_api(prim_path: str) -> None:
 def spawn_random_obstacle_world(cfg: RandomObstacleWorldConfig) -> None:
     """在 env_0 创建四面外墙和圆柱/方柱模板，随后由场景克隆。"""
 
-    if cfg.num_obstacles < 1:
+    if cfg.num_obstacles < 0:
         raise ValueError("random_obstacles num_obstacles must be positive")
     for name, cx, cy, sx, sy in outer_wall_specs(
         cfg.arena_size, cfg.wall_thickness

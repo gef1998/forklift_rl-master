@@ -2,10 +2,45 @@
 
 from __future__ import annotations
 
+import math
 import torch
 
 
 SUPPORTED_ACTION_CONTROL_MODES = ("body_twist", "wheel_velocity")
+
+
+def limit_wheel_velocity_acceleration(
+    desired_wheels: torch.Tensor,
+    previous_wheels: torch.Tensor,
+    dt: float,
+    wheel_radius: float,
+    wheel_base: float,
+    max_linear_acceleration: float,
+    max_angular_acceleration: float,
+    wheel_radius_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Bound nominal body-twist command changes, including braking/reversal.
+
+    Interpolate both wheels by one fraction. If both endpoints satisfy the
+    wheel/body speed limits, the result stays in that convex feasible set.
+    Independent wheel or twist-component clipping does not have this property.
+    This is a command bound, not a bound on collision impulses or measured
+    acceleration. Apply the safety shield afterwards so braking is not delayed.
+    """
+    if desired_wheels.shape != previous_wheels.shape:
+        raise ValueError("desired and previous wheels must have the same shape")
+    if any(not math.isfinite(x) or x <= 0 for x in (
+        dt, max_linear_acceleration, max_angular_acceleration
+    )):
+        raise ValueError("dt and acceleration limits must be finite and positive")
+    delta_wheels = desired_wheels - previous_wheels
+    delta_twist = wheel_velocities_to_body_twist(
+        delta_wheels, wheel_radius, wheel_base, wheel_radius_scale
+    )
+    linear_scale = (max_linear_acceleration * dt / delta_twist[..., 0].abs().clamp_min(1e-8))
+    angular_scale = (max_angular_acceleration * dt / delta_twist[..., 1].abs().clamp_min(1e-8))
+    scale = torch.minimum(linear_scale, angular_scale).clamp(max=1.0)
+    return previous_wheels + delta_wheels * scale.unsqueeze(-1), scale
 
 
 def differential_drive_kinematic_limits(

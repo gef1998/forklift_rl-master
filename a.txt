@@ -1,0 +1,1 @@
+/home/jz/isaacsim/python.sh ./scripts/skrl/play.py --checkpoint logs/skrl/emma_obs_nav_direct/2026-08-04_17-19-08_ppo_torch/checkpoints/agent_150000.pt --task Emma-RL-ObsNav-Direct-v0 --num_envs 1 

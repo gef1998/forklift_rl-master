@@ -153,6 +153,59 @@ def test_feasible_body_twist_is_not_scaled():
     torch.testing.assert_close(scale, torch.ones_like(scale))
 
 
+def test_acceleration_limits_cover_reversal_and_scaled_radii():
+    radius_scale = torch.tensor([0.8, 1.0, 1.2])
+    previous = torch.tensor([[8.0, 8.0], [8.0, -8.0], [-3.0, 7.0]])
+    desired = -previous
+    result, scale = action_control.limit_wheel_velocity_acceleration(
+        desired, previous, 0.02, 0.05, 0.43, 1.0, 2.0, radius_scale
+    )
+    delta = action_control.wheel_velocities_to_body_twist(
+        result - previous, 0.05, 0.43, radius_scale
+    )
+    assert torch.all(delta[:, 0].abs() <= 0.020001)
+    assert torch.all(delta[:, 1].abs() <= 0.040001)
+    assert torch.all((scale >= 0) & (scale <= 1))
+    torch.testing.assert_close(result, previous + scale[:, None] * (desired - previous))
+    # Each physics substep gets an equal fraction, avoiding 50 Hz stair steps.
+    halfway = previous + 0.5 * (result - previous)
+    substep_delta = action_control.wheel_velocities_to_body_twist(
+        halfway - previous, 0.05, 0.43, radius_scale
+    )
+    assert torch.all(substep_delta[:, 0].abs() <= 0.010001)
+    assert torch.all(substep_delta[:, 1].abs() <= 0.020001)
+
+
+def test_acceleration_interpolation_stays_in_speed_feasible_set():
+    generator = torch.Generator().manual_seed(12)
+    previous, _ = _project((torch.rand(1024, 2, generator=generator) - 0.5) * 40)
+    desired, _ = _project((torch.rand(1024, 2, generator=generator) - 0.5) * 40)
+    result, _ = action_control.limit_wheel_velocity_acceleration(
+        desired, previous, 0.02, WHEEL_RADIUS, WHEEL_BASE, 1.0, 2.0
+    )
+    twist = _twist(result)
+    assert torch.all(result.abs() <= WHEEL_MAX + 1e-6)
+    assert torch.all(twist[:, 0].abs() <= LINEAR_MAX + 1e-6)
+    assert torch.all(twist[:, 1].abs() <= ANGULAR_MAX + 1e-6)
+    unchanged, scale = action_control.limit_wheel_velocity_acceleration(
+        previous, previous, 0.02, WHEEL_RADIUS, WHEEL_BASE, 1.0, 2.0
+    )
+    torch.testing.assert_close(unchanged, previous)
+    torch.testing.assert_close(scale, torch.ones_like(scale))
+
+
+def test_invalid_acceleration_configuration_is_rejected():
+    for dt, linear, angular in [(0, 1, 2), (.02, -1, 2), (.02, 1, float('nan'))]:
+        try:
+            action_control.limit_wheel_velocity_acceleration(
+                torch.zeros(1, 2), torch.zeros(1, 2), dt, .05, .43, linear, angular
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid acceleration configuration accepted')
+
+
 def test_invalid_action_control_mode_is_rejected():
     try:
         _map(torch.zeros(1, 2), "unknown")
@@ -171,6 +224,9 @@ if __name__ == "__main__":
         test_coupled_projection_preserves_curvature,
         test_feasible_body_twist_is_not_scaled,
         test_invalid_action_control_mode_is_rejected,
+        test_acceleration_limits_cover_reversal_and_scaled_radii,
+        test_acceleration_interpolation_stays_in_speed_feasible_set,
+        test_invalid_acceleration_configuration_is_rejected,
     ]
     for test in tests:
         test()

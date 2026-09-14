@@ -1,0 +1,71 @@
+{
+  "args": {
+    "target": 1.0,
+    "turn": true,
+    "steps": 300,
+    "settle": 0.5,
+    "reverse_at": null,
+    "num_envs": 1024,
+    "legacy": false,
+    "no_acceleration_limits": false,
+    "linear_command_scale": null,
+    "effort_limit": 4.15,
+    "pos_iters": 8,
+    "vel_iters": 4,
+    "contacts": false,
+    "smoke": false,
+    "benchmark": true,
+    "out": "/home/jz/cqz/forklift_rl-master/artifacts/drive_diagnostics/20260912/bench_new84.json",
+    "device": "cuda:0",
+    "cpu": false,
+    "verbose": false,
+    "info": false,
+    "rendering_mode": null,
+    "kit_args": "",
+    "headless": true,
+    "hide_ui": true,
+    "create_new_stage": false,
+    "physics_gpu": 0,
+    "active_gpu": 0
+  },
+  "drive_config": {
+    "drive_wheel_collision_shape": "sphere",
+    "caster_collision_radius": 0.0395,
+    "drive_enable_external_forces_every_iteration": true,
+    "enable_motion_acceleration_limits": true,
+    "max_linear_acceleration": 1.0,
+    "max_angular_acceleration": 2.0,
+    "linear_acceleration_command_scale": 0.9,
+    "angular_acceleration_command_scale": 0.94
+  },
+  "dt": 0.01,
+  "decimation": 2,
+  "joint_names": [
+    "wheel_left",
+    "wheel_right",
+    "lift_joint",
+    "caster_fl_joint",
+    "caster_fr_joint",
+    "caster_rl_joint",
+    "caster_rr_joint"
+  ],
+  "body_names": [
+    "base_link",
+    "dwheel_left",
+    "dwheel_right",
+    "lift",
+    "caster_fl",
+    "caster_fr",
+    "caster_rl",
+    "caster_rr"
+  ],
+  "contact_names": [],
+  "checks": {
+    "proxies_cloned_visuals_preserved": true
+  },
+  "summary": {
+    "seconds": 4.269425245001912,
+    "env_steps_per_second": 71953.47906831952
+  },
+  "trace": []
+}
