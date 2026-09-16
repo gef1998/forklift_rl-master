@@ -17,7 +17,9 @@ Commands:
   install       Install the local Isaac Lab package
   list-envs     List registered project environments
   train         Train PPO on TASK
-  play          Play/evaluate a checkpoint on TASK
+  play          Play a checkpoint on TASK
+  evaluate      Run the legacy continuous play/evaluate loop
+  test          Scan three documented test scenarios and save metrics
   random-agent  Run TASK with random actions
   zero-agent    Run TASK with zero actions
   wheel-response  Run one-environment constant wheel velocity diagnostics
@@ -74,6 +76,10 @@ case "${command}" in
     play|evaluate)
         require_python
         "${ISAAC_PYTHON}" "${ROOT_DIR}/scripts/skrl/play.py" --task "${TASK}" --algorithm PPO "$@"
+        ;;
+    test)
+        require_python
+        "${ISAAC_PYTHON}" "${ROOT_DIR}/scripts/skrl/test.py" --task "${TASK}" --algorithm PPO "$@"
         ;;
     random-agent)
         require_python

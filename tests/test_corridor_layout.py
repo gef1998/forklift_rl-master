@@ -129,6 +129,31 @@ def test_direct_centerline_to_goal_is_blocked_by_both_barriers():
         assert center_x - size_x / 2.0 < 0.0 < center_x + size_x / 2.0
 
 
+def test_gate_width_can_be_scanned_with_valid_geometry():
+    for gate_width in (0.70, 1.25, 2.50):
+        corridor_geometry.validate_s_corridor_geometry(
+            arena_size=ARENA_SIZE,
+            wall_thickness=WALL_THICKNESS,
+            interior_wall_thickness=INTERIOR_WALL_THICKNESS,
+            inner_wall_offset=INNER_WALL_OFFSET,
+            gate_width=gate_width,
+            spawn_wall_margin=SPAWN_WALL_MARGIN,
+            spawn_jitter_x=SPAWN_JITTER_X,
+            spawn_jitter_y=SPAWN_JITTER_Y,
+            min_goal_distance=GOAL_MIN_DISTANCE,
+        )
+        specs = corridor_geometry.s_corridor_wall_specs(
+            arena_size=ARENA_SIZE,
+            wall_thickness=WALL_THICKNESS,
+            interior_wall_thickness=INTERIOR_WALL_THICKNESS,
+            inner_wall_offset=INNER_WALL_OFFSET,
+            gate_width=gate_width,
+        )
+        lower = {name: values for name, *values in specs}["LowerRightBarrier"]
+        inner_edge = ARENA_SIZE / 2.0 - WALL_THICKNESS
+        assert abs((lower[0] - lower[2] / 2.0) + inner_edge - gate_width) < 1.0e-6
+
+
 def test_impossible_corridor_goal_distance_is_rejected():
     try:
         corridor_geometry.sample_s_corridor_spawn_pairs(
@@ -157,6 +182,7 @@ if __name__ == "__main__":
         test_mirrored_layout_swaps_left_and_right_gates,
         test_spawn_and_goal_swap_opposite_corridor_ends_safely,
         test_direct_centerline_to_goal_is_blocked_by_both_barriers,
+        test_gate_width_can_be_scanned_with_valid_geometry,
         test_impossible_corridor_goal_distance_is_rejected,
     ]
     for test in tests:

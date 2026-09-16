@@ -50,8 +50,13 @@ from .async_lidar import (
     sinusoidal_aoi_encoding,
     warp_cached_ranges_and_clearances,
 )
+from .emma_obs_nav_corridor_world import CorridorWorldManager, spawn_s_corridor
 from .emma_obs_nav_env_cfg import EmmaObsNavEnvCfg
 from .drive_contacts import configure_drive_contacts
+from .emma_obs_nav_straight_obstacle_world import (
+    StraightObstacleWorldManager,
+    spawn_straight_obstacle_world,
+)
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
 from .navigation_rewards import (
     action_jitter_penalty,
@@ -86,9 +91,16 @@ class EmmaObsNavEnv(DirectRLEnv):
                 raise ValueError(f"{name} must be in (0, 1]")
         # 必须在 super().__init__() 之前设置 (因为 _setup_scene 在 super 内调用)
         self._world_mode = cfg.world_mode.strip().lower()
-        if self._world_mode not in ("random_obstacles", "ring", "warehouse"):
+        if self._world_mode not in (
+            "random_obstacles",
+            "ring",
+            "corridor",
+            "straight_obstacle",
+            "warehouse",
+        ):
             raise ValueError(
-                "world_mode must be 'random_obstacles', 'ring', or 'warehouse'"
+                "world_mode must be 'random_obstacles', 'ring', 'corridor', "
+                "'straight_obstacle', or 'warehouse'"
             )
         self._warehouse_cfg = cfg.warehouse_world if self._world_mode == "warehouse" else None
         goal_distance_normalization = cfg.goal_distance_normalization.strip().lower()
@@ -121,6 +133,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         selected_world_cfg = {
             "random_obstacles": cfg.random_obstacle_world,
             "ring": cfg.obs_world,
+            "corridor": cfg.corridor_world,
+            "straight_obstacle": cfg.straight_obstacle_world,
             "warehouse": cfg.warehouse_world,
         }[self._world_mode]
         cfg.terrain_sub_size = selected_world_cfg.arena_size
@@ -173,6 +187,37 @@ class EmmaObsNavEnv(DirectRLEnv):
                     "random_obstacles Emma-to-goal distance must be strictly "
                     "greater than 5m"
                 )
+        elif self._world_mode == "corridor":
+            from .corridor_geometry import validate_s_corridor_geometry
+
+            corridor_cfg = cfg.corridor_world
+            validate_s_corridor_geometry(
+                arena_size=corridor_cfg.arena_size,
+                wall_thickness=corridor_cfg.wall_thickness,
+                interior_wall_thickness=corridor_cfg.interior_wall_thickness,
+                inner_wall_offset=corridor_cfg.inner_wall_offset,
+                gate_width=corridor_cfg.gate_width,
+                spawn_wall_margin=corridor_cfg.spawn_wall_margin,
+                spawn_jitter_x=corridor_cfg.spawn_jitter_x,
+                spawn_jitter_y=corridor_cfg.spawn_jitter_y,
+                min_goal_distance=corridor_cfg.goal_min_distance,
+            )
+        elif self._world_mode == "straight_obstacle":
+            from .straight_obstacle_geometry import (
+                validate_straight_obstacle_geometry,
+            )
+
+            straight_cfg = cfg.straight_obstacle_world
+            straight_cfg.robot_half_width = cfg.robot_half_width
+            validate_straight_obstacle_geometry(
+                arena_length=straight_cfg.arena_length,
+                passage_width=straight_cfg.passage_width,
+                wall_thickness=straight_cfg.wall_thickness,
+                obstacle_length=straight_cfg.obstacle_length,
+                obstacle_width=straight_cfg.obstacle_width,
+                spawn_wall_margin=straight_cfg.spawn_wall_margin,
+                robot_half_width=cfg.robot_half_width,
+            )
 
         # Wheel actuator and body-twist limits are independent deployment
         # constraints. Both are projected after delay/noise without changing
@@ -258,6 +303,22 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._world_manager = RandomObstacleWorldManager(
                 num_envs=self.num_envs,
                 cfg=self.cfg.random_obstacle_world,
+                device=self.device,
+            )
+        elif self._world_mode == "corridor":
+            self._world_manager = CorridorWorldManager(
+                num_envs=self.num_envs,
+                cfg=self.cfg.corridor_world,
+                device=self.device,
+            )
+            self._world_manager.write_barrier_poses_to_sim(
+                self.scene,
+                self.scene.env_origins[:, :2],
+            )
+        elif self._world_mode == "straight_obstacle":
+            self._world_manager = StraightObstacleWorldManager(
+                num_envs=self.num_envs,
+                cfg=self.cfg.straight_obstacle_world,
                 device=self.device,
             )
         else:
@@ -736,6 +797,12 @@ class EmmaObsNavEnv(DirectRLEnv):
 
             spawn_random_obstacle_world(self.cfg.random_obstacle_world)
             obstacle_count = 4 + self.cfg.random_obstacle_world.num_obstacles
+        elif self._world_mode == "corridor":
+            spawn_s_corridor(self.cfg.corridor_world)
+            obstacle_count = 6
+        elif self._world_mode == "straight_obstacle":
+            spawn_straight_obstacle_world(self.cfg.straight_obstacle_world)
+            obstacle_count = 5
         else:
             # 混合圆柱/方块局部迷宫 + 外墙/错位内墙
             spawn_obstacles(self.num_envs, self.cfg.obs_world)
@@ -833,6 +900,16 @@ class EmmaObsNavEnv(DirectRLEnv):
                 self.scene.rigid_objects[f"random_obstacle_{i}"] = (
                     RigidObject(obstacle_cfg)
                 )
+        elif self._world_mode == "corridor":
+            for asset_name, prim_name in (
+                ("corridor_lower_barrier", "LowerRightBarrier"),
+                ("corridor_upper_barrier", "UpperLeftBarrier"),
+            ):
+                barrier_cfg = RigidObjectCfg(
+                    prim_path=f"/World/envs/env_.*/Corridor_{prim_name}",
+                    spawn=None,
+                )
+                self.scene.rigid_objects[asset_name] = RigidObject(barrier_cfg)
         elif self._world_mode == "ring":
             for i in range(self.cfg.obs_world.num_obstacles):
                 name = f"obstacle_{i}"
@@ -857,6 +934,15 @@ class EmmaObsNavEnv(DirectRLEnv):
                     camera_height = max(
                         14.0,
                         self.cfg.random_obstacle_world.arena_size * 1.15,
+                    )
+                elif self._world_mode == "corridor":
+                    camera_height = max(
+                        14.0, self.cfg.corridor_world.arena_size * 1.15
+                    )
+                elif self._world_mode == "straight_obstacle":
+                    camera_height = max(
+                        14.0,
+                        self.cfg.straight_obstacle_world.arena_size * 1.15,
                     )
                 else:
                     camera_height = max(
@@ -894,7 +980,11 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._active_phase = phase
             # 随机障碍布局在训练开始时生成一次。phase 只推进噪声课程，
             # 不重采样布局，避免大规模环境频繁重建 LiDAR mesh。
-            if self._world_mode != "random_obstacles":
+            if self._world_mode not in (
+                "random_obstacles",
+                "corridor",
+                "straight_obstacle",
+            ):
                 self._warp_mesh_dirty = True
 
         pfx = f"phase{phase}"
@@ -902,6 +992,8 @@ class EmmaObsNavEnv(DirectRLEnv):
             num_obs = getattr(cfg, f"{pfx}_num_cylinders")
         elif self._world_mode == "random_obstacles":
             num_obs = cfg.random_obstacle_world.num_obstacles
+        elif self._world_mode in ("corridor", "straight_obstacle"):
+            num_obs = 0
         else:
             num_obs = getattr(cfg, f"{pfx}_num_obstacles")
         return {
@@ -2196,6 +2288,38 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._term_reason[drifted & ~collision & ~goal_reached & ~fell] = 3
         self._term_reason[truncated] = 1
 
+        # Preserve current and terminal evaluation values before DirectRLEnv
+        # auto-resets ended environments. Every tensor is detached and cloned so
+        # the returned extras cannot be overwritten by _reset_idx in this step.
+        ending = terminated | truncated
+        velocity_w = robot.data.root_com_lin_vel_w[:, :2]
+        forward_w = math_utils.quat_apply(
+            robot.data.root_quat_w, robot.data.FORWARD_VEC_B
+        )
+        forward_w = torch.nn.functional.normalize(forward_w[:, :2], dim=-1)
+        evaluation = {
+            "position_xy": local_pos.detach().clone(),
+            "goal_position_xy": (
+                self.goal_pos_xy - self.scene.env_origins[:, :2]
+            ).detach().clone(),
+            "goal_distance": goal_dist.detach().clone(),
+            "initial_goal_distance": self._init_goal_dist.detach().clone(),
+            "minimum_clearance": self._safety_clearance.amin(dim=-1).detach().clone(),
+            "forward_speed": torch.sum(velocity_w * forward_w, dim=-1).detach().clone(),
+            "angular_speed": robot.data.root_ang_vel_b[:, 2].detach().clone(),
+            "episode_steps": self.episode_length_buf.detach().clone(),
+            "terminated": terminated.detach().clone(),
+            "truncated": truncated.detach().clone(),
+            "ended": ending.detach().clone(),
+            "termination_reason": self._term_reason.detach().clone(),
+            "collision": collision.detach().clone(),
+            "goal_reached": goal_reached.detach().clone(),
+            "fell": fell.detach().clone(),
+            "drifted": drifted.detach().clone(),
+            "timeout": truncated.detach().clone(),
+        }
+        self.extras["evaluation"] = evaluation
+
         # ---- 诊断 ----
         if not hasattr(self, '_diag_short_ep_count'):
             self._diag_short_ep_count = 0
@@ -2211,7 +2335,6 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._diag_short_ep_count += 1
 
         # ---- 终局统计 ----
-        ending = terminated | truncated
         n_ended = ending.sum().item()
         if n_ended > 0:
             reason_names = {1: "timeout", 2: "fell", 3: "drifted",
@@ -2301,6 +2424,10 @@ class EmmaObsNavEnv(DirectRLEnv):
                     f"{self.num_envs} envs, edge_spacing>="
                     f"{self.cfg.random_obstacle_world.min_obstacle_spacing:.2f}m"
                 )
+        elif self._world_mode in ("corridor", "straight_obstacle"):
+            # Static evaluation worlds are fully authored at scene creation.
+            self._obs_layout_initialized = True
+            self._warp_mesh_dirty = False
         else:
             # 局部迷宫: phase 切换时重采样随机障碍，否则复用各环境布局
             if not self._obs_layout_initialized or self._warp_mesh_dirty:

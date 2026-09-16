@@ -27,7 +27,9 @@ from isaaclab.sensors.ray_caster.patterns import BpearlPatternCfg
 from isaaclab.utils import configclass
 
 from ..asset_paths import resolve_asset
+from .emma_obs_nav_corridor_world import CorridorWorldConfig
 from .emma_obs_nav_random_obstacle_world import RandomObstacleWorldConfig
+from .emma_obs_nav_straight_obstacle_world import StraightObstacleWorldConfig
 from .emma_obs_nav_world import ObstacleWorldConfig
 from .emma_obs_nav_warehouse_world import WarehouseWorldConfig
 
@@ -121,7 +123,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # random_obstacles/ring 默认 10 m，warehouse 默认 16 m。
     terrain_sub_size: float = 10.0
 
-    # ---- World mode: "random_obstacles"、"ring" 或 "warehouse" ----
+    # ---- World mode: random_obstacles, ring, corridor, straight_obstacle, warehouse ----
     world_mode: str = "random_obstacles"
 
     sim: SimulationCfg = SimulationCfg(
@@ -198,7 +200,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     angular_acceleration_command_scale: float = 0.94
 
     sync_body_velocity_limits_to_wheels: bool = False
-    max_linear_velocity: float = 0.9
+    max_linear_velocity: float = 0.5
     max_angular_velocity: float = 1.5
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
@@ -308,6 +310,35 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         sampling_candidate_count=24,
         spawn_jitter=0.15,
         goal_min_distance=4.5,
+    )
+
+    corridor_world: CorridorWorldConfig = CorridorWorldConfig(
+        arena_size=10.0,
+        wall_thickness=0.15,
+        interior_wall_thickness=0.20,
+        wall_height=1.0,
+        inner_wall_offset=1.50,
+        gate_width=2.50,
+        spawn_wall_margin=1.0,
+        spawn_jitter_x=0.75,
+        spawn_jitter_y=0.20,
+        goal_min_distance=7.0,
+        mirror_across_envs=True,
+    )
+
+    straight_obstacle_world: StraightObstacleWorldConfig = (
+        StraightObstacleWorldConfig(
+            arena_length=6.0,
+            passage_width=1.50,
+            wall_thickness=0.15,
+            wall_height=1.0,
+            obstacle_length=0.1,
+            obstacle_width=1.20,
+            obstacle_height=1.0,
+            obstacle_type="cuboid",
+            spawn_wall_margin=1.0,
+            robot_half_width=robot_half_width,
+        )
     )
 
     # ---- 仓库世界 (world_mode="warehouse", 16 m × 16 m) ----

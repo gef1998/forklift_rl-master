@@ -132,6 +132,27 @@ TASK=Emma-RL-CostmapNav-Direct-v0 \
 bash launch.sh play --checkpoint logs/skrl/emma_obs_nav_direct/<run>/checkpoints/best_agent.pt
 ```
 
+按《测试文档》的回型路径、S 型路径和直行绕障执行自动宽度扫描：
+
+```bash
+bash launch.sh test --headless \
+  --checkpoint logs/skrl/emma_obs_nav_direct/<run>/checkpoints/best_agent.pt \
+  --load-kg 0 --mapping-mode simulation
+
+# 全局范围会同时应用于所有选定场景；例如三场景共同扫描 1.4–2.0 m
+bash launch.sh test --headless \
+  --checkpoint logs/skrl/emma_obs_nav_direct/<run>/checkpoints/best_agent.pt \
+  --width-min 1.4 --width-max 2.0 --width-step 0.1
+
+# 也可只测一个场景，并单独覆盖其范围
+bash launch.sh test --headless --scenarios straight_obstacle \
+  --straight-obstacle-width-min 0.7 \
+  --straight-obstacle-width-max 1.5 \
+  --straight-obstacle-width-step 0.1
+```
+
+扫描从宽到窄运行，每个静态宽度都会重建独立 Isaac 环境与 LiDAR mesh；同一宽度默认连续运行 3 回合，三回合均成功才判定通过。结果目录包含终端汇总、逐回合 `episodes.csv` 和带完整配置/宽度汇总的 `summary.json`。`--load-kg` 与 `--mapping-mode` 当前仅记录测试工况元数据，并不会改变尚未建模的载荷物理属性；直行绕障场景当前为单个静态长方体，不包含多障碍物或移动障碍物扩展。
+
 复用 `play.py` 的环境创建、reset、`env.step()` 和动作记录逻辑，仅将策略输出替换为
 恒定左右轮速命令：
 
