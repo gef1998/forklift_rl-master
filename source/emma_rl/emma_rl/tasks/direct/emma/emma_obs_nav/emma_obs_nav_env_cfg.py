@@ -88,7 +88,6 @@ class SafetyControlCfg:
     ttc_slow_s: float = 1.5
     ttc_stop_s: float = 0.4
     max_lidar_aoi_s: float = 0.20             # fail closed when last scan is older
-    intervention_penalty_scale: float = 1.0   # teach policy not to lean on shield
 
 # ---- Asset paths ----
 _EMMA_USD = resolve_asset("Emma_no_ground.usd", override_env="EMMA_USD_PATH")
@@ -461,72 +460,26 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     phase3_noise_end: float = 1.0
     
     # ====================================================================
-    # Reward — 简化的局部导航
+    # Reward — 直接面向任务的六项奖励，无 VFH 教师
     # ====================================================================
-    # 典型 5 m 回合：单边 Goal 势场只作辅助，到达 +25，碰撞 -30。
+    # 有正负的目标进度、近障、动作变化、时间、到达和失败。
     goal_reach_bonus: float = 25.0
-    obstacle_collision_penalty: float = -30.0
+    nav_failure_penalty: float = -30.0  # collision, fall or leaving the arena
     collision_clearance_threshold: float = 0.05
-    # 50 Hz 下约 -0.1875/s；80 s 完整 timeout 的累计量仍约为 -15。
-    time_penalty: float = -0.003
     fall_reset_height: float = -0.25
 
-    # VFH 只负责生成参考航向，策略仍直接输出线速度和角速度。
-    # 远场航路阻塞：3.5m 内视为明确阻塞，3.5~4.0m 使用有限 smoothstep
-    # 过渡。它只负责提前发现墙和入口，不扩大 repulse 的近场惩罚范围。
-    nav_vfh_route_lookahead: float = 4.0
-    nav_vfh_route_transition: float = 0.5
-    nav_vfh_smoothing_radius_bins: int = 2
-    nav_vfh_blocked_threshold: float = 0.55
-    # Goal 扇区畅通时优先直达；被阻挡时降低 Goal 偏好并提高开阔度权重。
-    nav_vfh_goal_cost: float = 1.0
-    nav_vfh_obstacle_cost: float = 1.5
-    nav_vfh_blocked_goal_cost: float = 1.0
-    nav_vfh_blocked_obstacle_cost: float = 4.0
-    nav_vfh_continuity_cost: float = 0.25
-    nav_vfh_switch_margin: float = 0.05
-    # 2rad/s≈115deg/s；参考航向只略快于车体，避免奖励目标移动得无法跟随。
-    nav_vfh_max_reference_rate_deg_s: float = 120.0
-    # 左右各15°窗口评价通道宽度与深度；阻塞时开阔通道可以压过 Goal 捷径。
-    nav_vfh_valley_half_width_deg: float = 15.0
-    nav_vfh_valley_width_cost: float = 0.8
-    nav_vfh_valley_depth_cost: float = 0.6
-    # 跟踪上一通道而非冻结旧角度；新通道需跨出该邻域并明显更优才切换。
-    nav_vfh_valley_keep_half_angle_deg: float = 40.0
-    # Goal 阻塞权重的一阶时间常数，50Hz 下约15步完成主要切换。
-    nav_vfh_blockage_time_constant_s: float = 0.30
-    # VFH+ 物理通道过滤：0.534m 车宽 + 两侧约 0.30m 安全余量。
-    nav_vfh_min_passage_width: float = 1.0
-    nav_vfh_passage_lookahead: float = 2.0
+    # Signed change in actual goal distance; reward units per metre.
+    # Moving away is negative, revisiting the same distance cannot repeatedly
+    # collect the old positive-only progress reward (undiscounted transitions).
+    nav_progress_per_meter: float = 5.0
 
-    # 运动奖励直接按每个 50 Hz 控制步给出，避免低速时物理积分量过小。
-    # Goal progress 只作弱辅助；主要教师信号来自正确转向和安全前进。
-    nav_progress_scale_per_step: float = 0.05
-    # 参考角达到 90°、并以最大正确角速度旋转时，每步获得完整转向奖励。
-    nav_turn_scale_per_step: float = 0.15
-    nav_turn_alignment_deadband_deg: float = 6.0
-    # 以最大前向速度沿 VFH 参考航向行驶时，每步获得完整前进奖励。
-    nav_safe_forward_scale_per_step: float = 0.5
-    # 5° 内保持完整奖励，5°~45° 用有限 smoothstep 衰减；45° 外严格为零。
-    # 该窗口只参与训练奖励和停滞判定，不会修改、裁剪或投影策略 action。
-    nav_safe_forward_full_reward_angle_deg: float = 5.0
-    nav_safe_forward_cutoff_angle_deg: float = 60.0
-    # 既不正确转向、也不沿参考航向前进时的逐步停滞惩罚。
-    nav_idle_scale_per_step: float = 0.03
-    # 1.2m 内使用有界反比例斥力；正前方 0.45m 满速行驶时净奖励约为零。
-    nav_repulse_start_clearance: float = 1.2
-    nav_repulse_scale_per_step: float = 0.7
-    # 保证侧面 0.3m 贴障行驶仍为负收益，而 0.5m 侧向净空保持可通行。
-    nav_repulse_lateral_weight_floor: float = 0.65
-    # 保留矩形车体旋转扫碰约束。
-    nav_repulse_rotation_weight: float = 0.15
-    # 近障静止仍承担小幅距离风险，避免“停车只付 time penalty”的局部最优。
-    nav_repulse_motion_floor: float = 0.15
-    nav_backward_scale_per_step: float = 0.05
+    # Running costs use seconds, independent of the control frequency.
+    # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
+    # Only a narrow near-collision band is penalized, preserving usable corridors.
+    nav_clearance_threshold: float = 0.35
+    nav_proximity_cost_per_second: float = 0.25
+    nav_time_cost_per_second: float = 0.10
 
-    # 策略原始归一化 action 的一阶差分：线速度允许正常起停，角速度重点抑制抖动。
-    action_linear_jitter_scale: float = 0.001
-    action_angular_jitter_scale: float = 0.003
-
-    # goal_dist 使用初始 spawn 距离归一化（绕行时允许大于 1）；
-    # IMU 使用物理速度上限归一化到约 [-1, 1]。
+    # One weak regularizer on changes in raw normalized policy actions.
+    # Charged per command change; ignored on the first action of each episode.
+    nav_action_change_scale: float = 0.002

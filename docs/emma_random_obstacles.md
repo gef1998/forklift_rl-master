@@ -38,7 +38,7 @@ Episode resets sample a new bank entry and a fresh heading; they do not rebuild
 PhysX bodies or the global Warp mesh. Torch's training seed also seeds the CPU
 geometry generator. Thus 1024 environments provide 1024 independent maps, with
 128 candidate tasks per map. This is geometric reachability, not a guarantee
-that the current policy or local VFH guidance can finish every detour in time.
+that the current policy can finish every detour in time.
 
 Run the geometry checks with the project's Isaac Lab Python:
 

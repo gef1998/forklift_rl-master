@@ -327,8 +327,6 @@ class EpisodeActionPlotRecorder:
         "wheel_right_actual_radps",
         "terminated",
         "truncated",
-        "reference_angle_rad",
-        "reference_delta_rad",
     )
 
     def __init__(self, output_dir: str, step_dt: float, max_episodes: int):
@@ -401,8 +399,6 @@ class EpisodeActionPlotRecorder:
         projection_scale = float(base_env._wheel_projection_scale[0].item())
         body_speed = float(base_env._last_forward_speed[0].item())
         body_angular_speed = float(base_env._last_angular_speed[0].item())
-        reference_angle = float(base_env._last_reference_angle[0].item())
-        reference_delta = float(base_env._last_reference_delta[0].item())
         step = len(self.records)
 
         self.records.append([
@@ -428,8 +424,6 @@ class EpisodeActionPlotRecorder:
             float(wheel_actual[1]),
             float(terminated),
             float(truncated),
-            reference_angle,
-            reference_delta,
         ])
 
         if terminated or truncated:
@@ -455,7 +449,7 @@ class EpisodeActionPlotRecorder:
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(5, 1, figsize=(14, 16), sharex=True)
+        fig, axes = plt.subplots(4, 1, figsize=(14, 13), sharex=True)
         axes[0].plot(
             command_time,
             plot_data[:, 3],
@@ -553,23 +547,7 @@ class EpisodeActionPlotRecorder:
         axes[3].legend()
         axes[3].grid(True)
 
-        axes[4].plot(
-            command_time,
-            plot_data[:, 22],
-            label="VFH reference angle",
-            linewidth=1.0,
-        )
-        axes[4].plot(
-            command_time,
-            plot_data[:, 23],
-            label="reference delta / step",
-            linewidth=0.8,
-            alpha=0.8,
-        )
-        axes[4].set_xlabel("time [s]")
-        axes[4].set_ylabel("reference [rad]")
-        axes[4].legend()
-        axes[4].grid(True)
+        axes[3].set_xlabel("time [s]")
 
         fig.suptitle(
             f"Emma action monitor — episode {self.episode_index}, "
@@ -766,8 +744,6 @@ def main():
             "_last_wheel_actual",
             "_last_forward_speed",
             "_last_angular_speed",
-            "_last_reference_angle",
-            "_last_reference_delta",
         )
         if not args_cli.ml_framework.startswith("torch"):
             print("[WARN] Action episode diagnostics currently require the torch framework")

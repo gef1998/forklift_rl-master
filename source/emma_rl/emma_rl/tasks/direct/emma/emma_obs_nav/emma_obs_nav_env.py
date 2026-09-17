@@ -58,19 +58,7 @@ from .emma_obs_nav_straight_obstacle_world import (
     spawn_straight_obstacle_world,
 )
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
-from .navigation_rewards import (
-    action_jitter_penalty,
-    bounded_smoothstep_blockage,
-    closing_repulse_penalty,
-    goal_aware_obstacle_relevance,
-    step_idle_penalty,
-    step_progress_reward,
-    step_safe_forward_reward,
-    step_turn_direction_reward,
-    vfh_opening_quality,
-    vfh_passage_mask,
-    vfh_reference_angle,
-)
+from .navigation_rewards import navigation_reward_terms
 from .safety_control import apply_safety_control
 
 
@@ -361,38 +349,6 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._last_angular_speed = torch.zeros(self.num_envs, device=self.device)
         self._last_wheel_command = torch.zeros_like(self.actions)
         self._last_wheel_actual = torch.zeros_like(self.actions)
-        self._reference_angle_state = torch.zeros(self.num_envs, device=self.device)
-        self._vfh_blockage_state = torch.zeros(self.num_envs, device=self.device)
-        self._reference_angle_valid = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        # 预先创建 VFH 诊断量，使 reset 后、第一次 step 前也能启用 play 记录器。
-        self._last_reference_angle = torch.zeros(self.num_envs, device=self.device)
-        self._last_reference_delta = torch.zeros(self.num_envs, device=self.device)
-        self._last_vfh_free_fraction = torch.ones(self.num_envs, device=self.device)
-        self._last_vfh_goal_histogram = torch.zeros(self.num_envs, device=self.device)
-        self._last_vfh_goal_blocked = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        self._last_vfh_blockage_score = torch.zeros(
-            self.num_envs, device=self.device
-        )
-        self._last_vfh_opening_width = torch.zeros(
-            self.num_envs, device=self.device
-        )
-        self._last_vfh_opening_depth = torch.zeros(
-            self.num_envs, device=self.device
-        )
-        self._last_vfh_passable_fraction = torch.ones(
-            self.num_envs, device=self.device
-        )
-        self._last_vfh_passage_fallback = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        self._last_vfh_kept_previous = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device
-        )
-        # ---- Action mapping diagnostics ----
         self._raw_wheel_vel_cmd = torch.zeros_like(self.actions)
         self._feasible_wheel_vel_cmd = torch.zeros_like(self.actions)
         self._wheel_vel_cmd = torch.zeros_like(self.actions)
@@ -504,102 +460,22 @@ class EmmaObsNavEnv(DirectRLEnv):
             )
         if self.cfg.collision_clearance_threshold < 0:
             raise ValueError("collision_clearance_threshold must be non-negative")
-        positive_reward_parameters = {
-            "nav_progress_scale_per_step": self.cfg.nav_progress_scale_per_step,
-            "nav_turn_scale_per_step": self.cfg.nav_turn_scale_per_step,
-            "nav_turn_alignment_deadband_deg":
-                self.cfg.nav_turn_alignment_deadband_deg,
-            "nav_safe_forward_scale_per_step":
-                self.cfg.nav_safe_forward_scale_per_step,
-            "nav_safe_forward_full_reward_angle_deg":
-                self.cfg.nav_safe_forward_full_reward_angle_deg,
-            "nav_safe_forward_cutoff_angle_deg":
-                self.cfg.nav_safe_forward_cutoff_angle_deg,
-            "nav_idle_scale_per_step": self.cfg.nav_idle_scale_per_step,
-            "nav_repulse_start_clearance": self.cfg.nav_repulse_start_clearance,
-            "nav_repulse_scale_per_step": self.cfg.nav_repulse_scale_per_step,
-            "nav_repulse_lateral_weight_floor":
-                self.cfg.nav_repulse_lateral_weight_floor,
-            "nav_repulse_rotation_weight": self.cfg.nav_repulse_rotation_weight,
-            "nav_repulse_motion_floor": self.cfg.nav_repulse_motion_floor,
-            "nav_backward_scale_per_step": self.cfg.nav_backward_scale_per_step,
-            "action_linear_jitter_scale": self.cfg.action_linear_jitter_scale,
-            "action_angular_jitter_scale": self.cfg.action_angular_jitter_scale,
-            "nav_vfh_route_lookahead": self.cfg.nav_vfh_route_lookahead,
-            "nav_vfh_route_transition": self.cfg.nav_vfh_route_transition,
-            "nav_vfh_blocked_threshold": self.cfg.nav_vfh_blocked_threshold,
-            "nav_vfh_goal_cost": self.cfg.nav_vfh_goal_cost,
-            "nav_vfh_obstacle_cost": self.cfg.nav_vfh_obstacle_cost,
-            "nav_vfh_blocked_goal_cost": self.cfg.nav_vfh_blocked_goal_cost,
-            "nav_vfh_blocked_obstacle_cost":
-                self.cfg.nav_vfh_blocked_obstacle_cost,
-            "nav_vfh_continuity_cost": self.cfg.nav_vfh_continuity_cost,
-            "nav_vfh_switch_margin": self.cfg.nav_vfh_switch_margin,
-            "nav_vfh_max_reference_rate_deg_s":
-                self.cfg.nav_vfh_max_reference_rate_deg_s,
-            "nav_vfh_valley_half_width_deg":
-                self.cfg.nav_vfh_valley_half_width_deg,
-            "nav_vfh_valley_width_cost": self.cfg.nav_vfh_valley_width_cost,
-            "nav_vfh_valley_depth_cost": self.cfg.nav_vfh_valley_depth_cost,
-            "nav_vfh_valley_keep_half_angle_deg":
-                self.cfg.nav_vfh_valley_keep_half_angle_deg,
-            "nav_vfh_blockage_time_constant_s":
-                self.cfg.nav_vfh_blockage_time_constant_s,
-            "nav_vfh_min_passage_width":
-                self.cfg.nav_vfh_min_passage_width,
-            "nav_vfh_passage_lookahead":
-                self.cfg.nav_vfh_passage_lookahead,
-        }
-        for name, value in positive_reward_parameters.items():
+        for name in (
+            "nav_progress_per_meter", "nav_proximity_cost_per_second",
+            "nav_time_cost_per_second", "nav_action_change_scale", "goal_reach_bonus",
+        ):
+            value = getattr(self.cfg, name)
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f"{name} must be finite and non-negative")
-        if self.cfg.nav_repulse_start_clearance <= 0.0:
-            raise ValueError("nav_repulse_start_clearance must be positive")
+        if not math.isfinite(self.cfg.nav_failure_penalty) or self.cfg.nav_failure_penalty >= 0:
+            raise ValueError("nav_failure_penalty must be finite and negative")
+        if (not math.isfinite(self.cfg.nav_clearance_threshold)
+                or self.cfg.nav_clearance_threshold <= self.cfg.collision_clearance_threshold):
+            raise ValueError("nav_clearance_threshold must exceed collision_clearance_threshold")
         if not (
-            self.cfg.ground_static_friction
-            >= self.cfg.ground_dynamic_friction
-            >= 0.0
+            self.cfg.ground_static_friction >= self.cfg.ground_dynamic_friction >= 0.0
         ):
-            raise ValueError(
-                "ground friction must satisfy static >= dynamic >= 0"
-            )
-        if self.cfg.nav_turn_alignment_deadband_deg >= 90.0:
-            raise ValueError("nav_turn_alignment_deadband_deg must be less than 90")
-        if not (
-            self.cfg.nav_safe_forward_full_reward_angle_deg
-            < self.cfg.nav_safe_forward_cutoff_angle_deg
-            <= 180.0
-        ):
-            raise ValueError(
-                "safe-forward angles must satisfy "
-                "0 <= full_reward < cutoff <= 180 degrees"
-            )
-        if self.cfg.nav_repulse_lateral_weight_floor > 1.0:
-            raise ValueError("nav_repulse_lateral_weight_floor must not exceed 1")
-        if self.cfg.nav_repulse_motion_floor > 1.0:
-            raise ValueError("nav_repulse_motion_floor must not exceed 1")
-        if self.cfg.nav_vfh_smoothing_radius_bins < 0:
-            raise ValueError("nav_vfh_smoothing_radius_bins must be non-negative")
-        if self.cfg.nav_vfh_route_lookahead <= 0.0:
-            raise ValueError("nav_vfh_route_lookahead must be positive")
-        if not 0.0 < self.cfg.nav_vfh_route_transition < self.cfg.nav_vfh_route_lookahead:
-            raise ValueError(
-                "nav_vfh_route_transition must be in (0, route_lookahead)"
-            )
-        if not 0.0 < self.cfg.nav_vfh_valley_half_width_deg < 180.0:
-            raise ValueError("nav_vfh_valley_half_width_deg must be in (0, 180)")
-        if not 0.0 < self.cfg.nav_vfh_valley_keep_half_angle_deg <= 180.0:
-            raise ValueError(
-                "nav_vfh_valley_keep_half_angle_deg must be in (0, 180]"
-            )
-        if self.cfg.nav_vfh_blockage_time_constant_s <= 0.0:
-            raise ValueError("nav_vfh_blockage_time_constant_s must be positive")
-        if not 0.0 < self.cfg.nav_vfh_blocked_threshold < 1.0:
-            raise ValueError("nav_vfh_blocked_threshold must be in (0, 1)")
-        if self.cfg.nav_vfh_min_passage_width <= 0.0:
-            raise ValueError("nav_vfh_min_passage_width must be positive")
-        if self.cfg.nav_vfh_passage_lookahead <= 0.0:
-            raise ValueError("nav_vfh_passage_lookahead must be positive")
+            raise ValueError("ground friction must satisfy static >= dynamic >= 0")
         self._cached_scan_ranges = torch.full(
             (self.num_envs, sectors), self.cfg.lidar_max_distance, device=self.device)
         self._cached_scan_angles = self._lidar_sector_angles.clone()
@@ -644,13 +520,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._pending_write_index = torch.zeros(
             self.num_envs, dtype=torch.long, device=self.device)
 
-        # Derived current-frame buffers consumed by the reward function.
-        self._cached_clearance = torch.full(
-            (self.num_envs, sectors), self.cfg.lidar_max_distance,
-            device=self.device)
-        self._cached_dist = torch.full(
-            (self.num_envs, sectors), self.cfg.lidar_max_distance,
-            device=self.device)
+        # Separate delayed shield data from current reward/termination geometry.
         self._shield_clearance = torch.full(
             (self.num_envs, sectors), self.cfg.lidar_max_distance,
             device=self.device)
@@ -660,6 +530,8 @@ class EmmaObsNavEnv(DirectRLEnv):
             device=self.device)
         self._collision_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device)
+        self._failure_mask = torch.zeros_like(self._collision_mask)
+        self._goal_reached_mask = torch.zeros_like(self._collision_mask)
         self._latest_clean_raw_ranges = torch.full(
             (self.num_envs, self.cfg.num_lidar_rays),
             self.cfg.lidar_max_distance,
@@ -1689,7 +1561,7 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         current_time = self._control_time()
         current_sensor_pose = self._get_lidar_sensor_pose_2d(yaw)
-        lidar_dist_2d, aoi, clearance = self._update_async_lidar(
+        _, aoi, clearance = self._update_async_lidar(
             current_sensor_pose, current_time, ns)
 
         # Clearance is aggregated per transformed hit point before sector
@@ -1770,8 +1642,6 @@ class EmmaObsNavEnv(DirectRLEnv):
         lidar_norm = (
             cfg.lidar_max_distance - clearance_clip
         ) / (cfg.lidar_max_distance + 1.0)
-        self._cached_clearance = clearance
-        self._cached_dist = lidar_dist_2d
 
         # Continuous encoding of actual Age of Information (generation time,
         # including sensor latency and dropped scans), not a cycle index.
@@ -1855,8 +1725,8 @@ class EmmaObsNavEnv(DirectRLEnv):
     # Reward
     # ==================================================================
     def _get_rewards(self) -> torch.Tensor:
-        phase = self._get_phase_params()
-        nav_sum, _, _ = self._compute_nav_rewards(phase)
+        self._get_phase_params()  # Advance the scene/noise curriculum only.
+        nav_sum = self._compute_nav_rewards()
 
         if hasattr(self, "extras"):
             log = self.extras.setdefault("log", {})
@@ -1897,375 +1767,63 @@ class EmmaObsNavEnv(DirectRLEnv):
                 torch.full_like(self._safety_min_ttc, self.cfg.safety_control.ttc_slow_s * 2.0),
             )
             log["Safety/min_ttc_mean"] = finite_ttc.mean()
-            if hasattr(self, "_last_approach_reward"):
-                log["Reward/progress_mean"] = self._last_approach_reward.mean()
-                log["Reward/turn_direction_mean"] = self._last_turn_reward.mean()
-                log["Reward/safe_forward_mean"] = (
-                    self._last_safe_forward_reward.mean()
-                )
-                log["Reward/idle_penalty_mean"] = (
-                    self._last_idle_penalty.mean()
-                )
-                log["Reward/repulse_mean"] = self._last_repulse_reward.mean()
-                log["Reward/action_jitter_penalty_mean"] = (
-                    self._last_jitter_penalty.mean()
-                )
-                log["Reward/goal_bonus_mean"] = self._last_goal_bonus.mean()
-                log["Reward/collision_penalty_mean"] = (
-                    self._last_collision_penalty.mean()
-                )
-                log["Reward/backward_penalty_mean"] = (
-                    self._last_backward_penalty.mean()
-                )
-                log["Navigation/reference_angle_abs_mean"] = (
-                    self._last_reference_angle.abs().mean()
-                )
-                log["Navigation/reference_delta_abs_mean"] = (
-                    self._last_reference_delta.abs().mean()
-                )
-                turn_required = self._last_reference_angle.abs() > math.radians(
-                    self.cfg.nav_turn_alignment_deadband_deg
-                )
-                log["Navigation/turn_direction_match_rate"] = (
-                    (
-                        (self._last_turn_direction_score > 0.0)
-                        & turn_required
-                    ).float().sum()
-                    / turn_required.float().sum().clamp_min(1.0)
-                )
-                log["Navigation/task_activity_mean"] = (
-                    self._last_task_activity.mean()
-                )
-                log["Navigation/vfh_free_fraction_mean"] = (
-                    self._last_vfh_free_fraction.mean()
-                )
-                log["Navigation/vfh_goal_histogram_mean"] = (
-                    self._last_vfh_goal_histogram.mean()
-                )
-                log["Navigation/vfh_goal_blocked_rate"] = (
-                    self._last_vfh_goal_blocked.float().mean()
-                )
-                log["Navigation/vfh_blockage_score_mean"] = (
-                    self._last_vfh_blockage_score.mean()
-                )
-                log["Navigation/vfh_selected_width_quality_mean"] = (
-                    self._last_vfh_opening_width.mean()
-                )
-                log["Navigation/vfh_selected_depth_quality_mean"] = (
-                    self._last_vfh_opening_depth.mean()
-                )
-                log["Navigation/vfh_passable_fraction_mean"] = (
-                    self._last_vfh_passable_fraction.mean()
-                )
-                log["Navigation/vfh_passage_fallback_rate"] = (
-                    self._last_vfh_passage_fallback.float().mean()
-                )
-                log["Navigation/vfh_keep_rate"] = (
-                    self._last_vfh_kept_previous.float().mean()
-                )
-                log["Navigation/goal_distance_mean"] = (
-                    self._last_goal_distance.mean()
-                )
-                log["Navigation/closing_risk_mean"] = self._last_closing_risk.mean()
-                log["Motion/action_jitter_mean"] = self._last_action_jitter.mean()
-                log["Motion/linear_action_jitter_mean"] = (
-                    self._last_linear_action_jitter.mean()
-                )
-                log["Motion/angular_action_jitter_mean"] = (
-                    self._last_angular_action_jitter.mean()
-                )
-                log["Motion/forward_speed_mean"] = (
-                    self._last_forward_speed.mean()
-                )
-                log["Motion/reverse_rate"] = (
-                    self._last_forward_speed < -0.02
-                ).float().mean()
-                log["Motion/abs_angular_speed_mean"] = (
-                    self._last_abs_angular_speed.mean()
-                )
-
-        # Update tracking
-        ICR_pos_w = self.robot.data.root_pos_w
-        self._prev_goal_dist = torch.linalg.norm(
-            self.goal_pos_xy - ICR_pos_w[:, :2], dim=1,
-        )
+            for name, term in self._reward_terms.items():
+                log[f"Reward/{name}_mean"] = term.mean()
+            log["Reward/total_mean"] = nav_sum.mean()
+            log["Navigation/goal_distance_mean"] = self._last_goal_distance.mean()
+            log["Navigation/minimum_clearance_mean"] = self._safety_clearance.amin(dim=-1).mean()
+            log["Motion/forward_speed_mean"] = self._last_forward_speed.mean()
+            log["Motion/reverse_rate"] = (self._last_forward_speed < -0.02).float().mean()
+            log["Motion/abs_angular_speed_mean"] = self._last_angular_speed.abs().mean()
 
         return nav_sum.unsqueeze(-1)
 
     # ==================================================================
     # Navigation reward
     # ==================================================================
-    def _compute_nav_rewards(self, phase: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """计算简化后的局部导航奖励。
-
-        Goal 与 LiDAR 共同生成唯一参考航向。角速度只因缩小参考航向误差
-        获得奖励，前向速度不再参与航向奖励，因此原地保持对齐无法刷分。
-        """
-        del phase  # 奖励尺度不再随课程阶段变化，阶段只控制场景难度。
+    def _compute_nav_rewards(self) -> torch.Tensor:
+        """Reward task progress directly, without a heuristic heading teacher."""
         cfg = self.cfg
         robot = self.robot
-        step_dt = self.step_dt
+        goal_distance = torch.linalg.norm(
+            self.goal_pos_xy - robot.data.root_pos_w[:, :2], dim=-1
+        )
+        # _get_dones runs first: use the same fresh geometry and terminal masks.
+        self._reward_terms = navigation_reward_terms(
+            self._prev_goal_dist, goal_distance,
+            self._safety_clearance.amin(dim=-1),
+            self._policy_actions, self._prev_policy_actions,
+            self.episode_length_buf > 1,
+            self._goal_reached_mask, self._failure_mask,
+            step_dt=self.step_dt,
+            progress_per_meter=cfg.nav_progress_per_meter,
+            clearance_threshold=cfg.nav_clearance_threshold,
+            collision_clearance=cfg.collision_clearance_threshold,
+            proximity_cost_per_second=cfg.nav_proximity_cost_per_second,
+            time_cost_per_second=cfg.nav_time_cost_per_second,
+            action_change_scale=cfg.nav_action_change_scale,
+            goal_bonus=cfg.goal_reach_bonus,
+            failure_penalty=cfg.nav_failure_penalty,
+        )
+        self._prev_goal_dist.copy_(goal_distance.detach())
+        self._prev_policy_actions.copy_(self._policy_actions.detach())
+        self._last_goal_distance = goal_distance.detach()
 
-        # ---- 车体运动与 Goal ----
-        position_w = robot.data.root_pos_w
-        velocity_w = robot.data.root_com_lin_vel_w[:, :2]
+        # Keep measured motion diagnostics used by play.py and evaluation tools.
         forward_w = math_utils.quat_apply(
             robot.data.root_quat_w, robot.data.FORWARD_VEC_B
         )
         forward_w = torch.nn.functional.normalize(forward_w[:, :2], dim=-1)
-        forward_speed = torch.sum(velocity_w * forward_w, dim=-1)
-        angular_velocity = robot.data.root_ang_vel_b[:, 2]
-
-        to_goal_w = self.goal_pos_xy - position_w[:, :2]
-        goal_distance = torch.linalg.norm(to_goal_w, dim=-1)
-        goal_direction_w = torch.nn.functional.normalize(to_goal_w, dim=-1)
-        yaw = torch.atan2(forward_w[:, 1], forward_w[:, 0])
-        goal_direction_b = _rotate_world_to_body_2d(goal_direction_w, yaw)
-        goal_angle_b = torch.atan2(
-            goal_direction_b[:, 1], goal_direction_b[:, 0]
-        )
-
-        # ---- 弱 Goal 辅助：按本步最大可行位移归一化，远离不扣分 ----
-        r_progress = step_progress_reward(
-            self._prev_goal_dist,
-            goal_distance,
-            full_progress_distance=cfg.max_linear_velocity * step_dt,
-            scale_per_step=cfg.nav_progress_scale_per_step,
-        )
-
-        # ---- VFH 参考航向：只选择稳定自由通道，不直接修改策略 action ----
-        clearance = self._cached_clearance
-        sector_angles = self._lidar_sector_angles
-        route_blockage = bounded_smoothstep_blockage(
-            clearance,
-            blocked_distance=(
-                cfg.nav_vfh_route_lookahead - cfg.nav_vfh_route_transition
-            ),
-            free_distance=cfg.nav_vfh_route_lookahead,
-        )
-        obstacle_relevance = goal_aware_obstacle_relevance(
-            clearance,
-            sector_angles,
-            goal_angle_b,
-            goal_distance,
-            goal_reach_dist=cfg.goal_reach_dist,
-            collision_clearance_threshold=cfg.collision_clearance_threshold,
-        )
-        obstacle_density = route_blockage * obstacle_relevance
-        # VFH+ 通道可行性：近场命中点按车宽和侧向安全余量做距离相关
-        # 角膨胀。前视距离不越过 Goal，避免目标后方墙体屏蔽到达方向。
-        passage_horizon = torch.minimum(
-            goal_distance,
-            torch.full_like(goal_distance, cfg.nav_vfh_passage_lookahead),
-        )
-        passage_mask = vfh_passage_mask(
-            self._cached_dist,
-            passage_horizon,
-            min_passage_width=cfg.nav_vfh_min_passage_width,
-        )
-        sector_width_deg = 360.0 / cfg.lidar_output_sectors
-        valley_radius_bins = max(
-            1,
-            int(round(cfg.nav_vfh_valley_half_width_deg / sector_width_deg)),
-        )
-        opening_width_quality, opening_depth_quality = vfh_opening_quality(
-            clearance,
-            passage_mask,
-            route_lookahead=cfg.nav_vfh_route_lookahead,
-            valley_radius_bins=valley_radius_bins,
-        )
-        # 上一参考角存储在上一车体系中，先用实际角速度补偿本步车体旋转。
-        previous_reference_b = torch.atan2(
-            torch.sin(self._reference_angle_state - angular_velocity * step_dt),
-            torch.cos(self._reference_angle_state - angular_velocity * step_dt),
-        )
-        reference_angle, vfh_diag = vfh_reference_angle(
-            obstacle_density,
-            sector_angles,
-            goal_angle_b,
-            previous_reference_b,
-            self._reference_angle_valid,
-            smoothing_radius_bins=cfg.nav_vfh_smoothing_radius_bins,
-            blocked_threshold=cfg.nav_vfh_blocked_threshold,
-            goal_cost=cfg.nav_vfh_goal_cost,
-            obstacle_cost=cfg.nav_vfh_obstacle_cost,
-            blocked_goal_cost=cfg.nav_vfh_blocked_goal_cost,
-            blocked_obstacle_cost=cfg.nav_vfh_blocked_obstacle_cost,
-            continuity_cost=cfg.nav_vfh_continuity_cost,
-            switch_margin=cfg.nav_vfh_switch_margin,
-            max_reference_delta_rad=math.radians(
-                cfg.nav_vfh_max_reference_rate_deg_s
-            ) * step_dt,
-            passage_mask=passage_mask,
-            opening_width_quality=opening_width_quality,
-            opening_depth_quality=opening_depth_quality,
-            opening_width_cost=cfg.nav_vfh_valley_width_cost,
-            opening_depth_cost=cfg.nav_vfh_valley_depth_cost,
-            previous_blockage=self._vfh_blockage_state,
-            blockage_smoothing_alpha=(
-                1.0
-                - math.exp(
-                    -step_dt / cfg.nav_vfh_blockage_time_constant_s
-                )
-            ),
-            valley_keep_half_angle_rad=math.radians(
-                cfg.nav_vfh_valley_keep_half_angle_deg
-            ),
-        )
-        self._reference_angle_state.copy_(reference_angle.detach())
-        self._vfh_blockage_state.copy_(vfh_diag["goal_blockage"].detach())
-        self._reference_angle_valid.fill_(True)
-
-        # 直接按逐步角速度奖励正确转向，避免低速物理积分信号过小。
-        r_turn, turn_direction_score = step_turn_direction_reward(
-            reference_angle,
-            angular_velocity,
-            max_angular_velocity=cfg.max_angular_velocity,
-            scale_per_step=cfg.nav_turn_scale_per_step,
-            deadband_rad=math.radians(cfg.nav_turn_alignment_deadband_deg),
-        )
-
-        # 只在有限 VFH 对齐窗口内奖励前进；截止角外严格不提供该项收益。
-        r_safe_forward = step_safe_forward_reward(
-            forward_speed,
-            reference_angle,
-            max_forward_speed=cfg.max_linear_velocity,
-            scale_per_step=cfg.nav_safe_forward_scale_per_step,
-            full_reward_angle_rad=math.radians(
-                cfg.nav_safe_forward_full_reward_angle_deg
-            ),
-            cutoff_angle_rad=math.radians(
-                cfg.nav_safe_forward_cutoff_angle_deg
-            ),
-        )
-
-        # 正确转向或安全前进都能免除停滞惩罚，原地保持不再是低成本策略。
-        p_idle, task_activity = step_idle_penalty(
-            forward_speed,
-            angular_velocity,
-            reference_angle,
-            max_forward_speed=cfg.max_linear_velocity,
-            max_angular_velocity=cfg.max_angular_velocity,
-            scale_per_step=cfg.nav_idle_scale_per_step,
-            turn_deadband_rad=math.radians(
-                cfg.nav_turn_alignment_deadband_deg
-            ),
-            forward_full_reward_angle_rad=math.radians(
-                cfg.nav_safe_forward_full_reward_angle_deg
-            ),
-            forward_cutoff_angle_rad=math.radians(
-                cfg.nav_safe_forward_cutoff_angle_deg
-            ),
-        )
-
-        # 斥力覆盖前后近障、侧向贴障和转向扫尾；Goal 后方障碍仍由 relevance 降权。
-        p_repulse, closing_risk = closing_repulse_penalty(
-            clearance,
-            sector_angles,
-            forward_speed,
-            angular_velocity,
-            start_clearance=cfg.nav_repulse_start_clearance,
-            max_speed=cfg.max_linear_velocity,
-            scale_per_step=cfg.nav_repulse_scale_per_step,
-            robot_half_length=cfg.robot_half_length,
-            robot_half_width=cfg.robot_half_width,
-            lateral_weight_floor=cfg.nav_repulse_lateral_weight_floor,
-            rotation_weight=cfg.nav_repulse_rotation_weight,
-            motion_floor=cfg.nav_repulse_motion_floor,
-            obstacle_relevance=obstacle_relevance,
-        )
-
-        # 倒车按相对最大速度逐步惩罚，短距离脱困仍可行。
-        p_backward = (
-            -cfg.nav_backward_scale_per_step
-            * (torch.relu(-forward_speed) / cfg.max_linear_velocity).clamp(max=1.0)
-        )
-
-        # 对策略原始 action 做一阶差分，避免把域随机化噪声归因给策略。
-        action_delta_sq = (
-            self._policy_actions - self._prev_policy_actions
-        ).square()
-        p_jitter, action_jitter = action_jitter_penalty(
-            self._policy_actions,
-            self._prev_policy_actions,
-            linear_scale=cfg.action_linear_jitter_scale,
-            angular_scale=cfg.action_angular_jitter_scale,
-        )
-        self._prev_policy_actions = self._policy_actions.detach().clone()
-
-        # ---- 终局与时间 ----
-        collision = self._collision_mask
-        goal_reached = (goal_distance < cfg.goal_reach_dist) & ~collision
-        r_goal = goal_reached.float() * cfg.goal_reach_bonus
-        p_collision = collision.float() * cfg.obstacle_collision_penalty
-        p_time = torch.full_like(goal_distance, cfg.time_penalty)
-
-        # ---- 训练诊断 ----
-        self._last_approach_reward = r_progress.detach()
-        self._last_goal_distance = goal_distance.detach()
-        self._last_turn_reward = r_turn.detach()
-        self._last_reference_angle = reference_angle.detach()
-        self._last_reference_delta = vfh_diag["reference_delta"].detach()
-        self._last_vfh_free_fraction = (
-            vfh_diag["free_mask"].float().mean(dim=-1).detach()
-        )
-        self._last_vfh_goal_histogram = vfh_diag["goal_histogram"].detach()
-        self._last_vfh_goal_blocked = vfh_diag["goal_blocked"].detach()
-        self._last_vfh_blockage_score = vfh_diag["goal_blockage"].detach()
-        self._last_vfh_opening_width = (
-            vfh_diag["selected_width_quality"].detach()
-        )
-        self._last_vfh_opening_depth = (
-            vfh_diag["selected_depth_quality"].detach()
-        )
-        self._last_vfh_passable_fraction = (
-            vfh_diag["passable_mask"].float().mean(dim=-1).detach()
-        )
-        self._last_vfh_passage_fallback = (
-            vfh_diag["passage_fallback"].detach()
-        )
-        self._last_vfh_kept_previous = vfh_diag["kept_previous"].detach()
-        self._last_turn_direction_score = turn_direction_score.detach()
-        self._last_safe_forward_reward = r_safe_forward.detach()
-        self._last_idle_penalty = p_idle.detach()
-        self._last_task_activity = task_activity.detach()
-        self._last_repulse_reward = p_repulse.detach()
-        self._last_closing_risk = closing_risk.detach()
-        self._last_backward_penalty = p_backward.detach()
-        self._last_jitter_penalty = p_jitter.detach()
-        self._last_action_jitter = action_jitter.detach()
-        self._last_linear_action_jitter = action_delta_sq[:, 0].detach()
-        self._last_angular_action_jitter = action_delta_sq[:, 1].detach()
-        self._last_goal_bonus = r_goal.detach()
-        self._last_collision_penalty = p_collision.detach()
-        self._last_time_penalty = p_time.detach()
-        self._last_forward_speed = forward_speed.detach()
-        self._last_angular_speed = angular_velocity.detach()
-        self._last_abs_angular_speed = angular_velocity.abs().detach()
-        self._last_wheel_command = self._wheel_vel_cmd.detach().clone()
-        left_id = int(self.left_ids[0])
-        right_id = int(self.right_ids[0])
-        self._last_wheel_actual = torch.stack(
-            (
-                robot.data.joint_vel[:, left_id],
-                robot.data.joint_vel[:, right_id],
-            ),
-            dim=-1,
+        self._last_forward_speed = torch.sum(
+            robot.data.root_com_lin_vel_w[:, :2] * forward_w, dim=-1
         ).detach()
-
-        total = (
-            r_progress
-            + r_turn
-            + r_safe_forward
-            + p_idle
-            + p_repulse
-            + p_backward
-            + p_jitter
-            + r_goal
-            + p_collision
-            + p_time
-        )
-        return total, collision, goal_reached
+        self._last_angular_speed = robot.data.root_ang_vel_b[:, 2].detach()
+        self._last_wheel_command = self._wheel_vel_cmd.detach().clone()
+        self._last_wheel_actual = torch.stack(
+            (robot.data.joint_vel[:, int(self.left_ids[0])],
+             robot.data.joint_vel[:, int(self.right_ids[0])]), dim=-1
+        ).detach()
+        return sum(self._reward_terms.values())
 
     # ==================================================================
     # Termination
@@ -2281,7 +1839,7 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         root_z = robot.data.root_pos_w[:, 2]
-        fell = (root_z < cfg.fall_reset_height) | ~torch.isfinite(root_z)
+        fell = (root_z < cfg.fall_reset_height) | ~torch.isfinite(robot.data.root_pos_w).all(dim=-1)
 
         local_pos = robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
         drift_limit = self.cfg.terrain_sub_size / 2.0 - self.cfg.robot_half_length
@@ -2290,9 +1848,11 @@ class EmmaObsNavEnv(DirectRLEnv):
         goal_dist = torch.linalg.norm(
             self.goal_pos_xy - robot.data.root_pos_w[:, :2], dim=-1)
         collision = self._collision_mask
-        goal_reached = (goal_dist < cfg.goal_reach_dist) & ~collision
+        self._failure_mask = collision | fell | drifted | self._terminated
+        goal_reached = (goal_dist < cfg.goal_reach_dist) & ~self._failure_mask
+        self._goal_reached_mask = goal_reached
 
-        terminated = fell | drifted | collision | goal_reached | self._terminated
+        terminated = self._failure_mask | goal_reached
         truncated = time_out & (~terminated)
 
         self._term_reason[collision] = 4
@@ -2564,20 +2124,6 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._prev_goal_dist[env_ids] = init_dist
         self._policy_actions[env_ids] = 0.0
         self._prev_policy_actions[env_ids] = 0.0
-        self._reference_angle_state[env_ids] = 0.0
-        self._vfh_blockage_state[env_ids] = 0.0
-        self._reference_angle_valid[env_ids] = False
-        self._last_reference_angle[env_ids] = 0.0
-        self._last_reference_delta[env_ids] = 0.0
-        self._last_vfh_free_fraction[env_ids] = 1.0
-        self._last_vfh_goal_histogram[env_ids] = 0.0
-        self._last_vfh_goal_blocked[env_ids] = False
-        self._last_vfh_blockage_score[env_ids] = 0.0
-        self._last_vfh_opening_width[env_ids] = 0.0
-        self._last_vfh_opening_depth[env_ids] = 0.0
-        self._last_vfh_passable_fraction[env_ids] = 1.0
-        self._last_vfh_passage_fallback[env_ids] = False
-        self._last_vfh_kept_previous[env_ids] = False
         self._raw_wheel_vel_cmd[env_ids] = 0.0
         self._feasible_wheel_vel_cmd[env_ids] = 0.0
         self._wheel_vel_cmd[env_ids] = 0.0
@@ -2599,6 +2145,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._safety_intervened[env_ids] = False
         self._safety_emergency_stopped[env_ids] = False
         self._collision_mask[env_ids] = False
+        self._failure_mask[env_ids] = False
+        self._goal_reached_mask[env_ids] = False
         self._safety_clearance[env_ids] = self.cfg.lidar_max_distance
         self._shield_clearance[env_ids] = self.cfg.lidar_max_distance
         self._shield_aoi[env_ids] = 0.0
@@ -2620,7 +2168,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         # ---- 6. 诊断: spawn 后立即检查是否已处于碰撞 ----
         if not hasattr(self, '_spawn_diag_count'):
             self._spawn_diag_count = 0
-        if self._spawn_diag_count < 10 and hasattr(self, '_cached_clearance'):
+        if self._spawn_diag_count < 10:
             clearance = self._safety_clearance[env_ids]  # (n, S), clean/current
             min_clr = clearance.min(dim=-1)[0]            # (n,)
             bad = min_clr <= self.cfg.collision_clearance_threshold
