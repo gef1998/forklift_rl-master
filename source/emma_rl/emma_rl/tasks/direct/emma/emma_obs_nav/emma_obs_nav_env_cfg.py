@@ -257,8 +257,10 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
 
     # ====================================================================
     # Random-obstacle world（课程第一阶段）
-    #   10 m 封闭场景内均匀布置圆柱和方柱；障碍物几何边缘净距至少
-    #   1.5 m。Emma/Goal 联合安全采样，直线距离严格大于 5 m。
+    #   同一生成分布：随机连通内墙图 + 随机回环 + 圆柱/方柱散障。
+    #   自然组合 S 型、回型和直行绕障，不切换固定场景模板。
+    #   散障间净距 >= 1.5 m；起终点位于膨胀后的同一连通域，距离 > 5.2 m。
+    #   每个并行环境初始化独立地图，reset 从该地图的安全点对库采样。
     # ====================================================================
     random_obstacle_world: RandomObstacleWorldConfig = RandomObstacleWorldConfig(
         arena_size=10.0,
@@ -278,6 +280,15 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         goal_min_distance=5.20,
         obstacle_candidate_count=32,
         spawn_candidate_count=96,
+        structured_layout=True,       # False 可恢复旧的纯散障生成器
+        grid_size=3,                  # 3×3 通道图，12 个可隐藏的内墙槽位
+        interior_wall_thickness=0.15,
+        wall_jitter=0.20,              # 内墙法向独立扰动，单位 m
+        loop_probability_range=(0.0, 0.65),
+        clutter_density_range=(0.35, 1.0),  # num_obstacles 为容量上限
+        navigation_clearance=0.60,     # 车身半对角线 + 通行余量
+        connectivity_grid_resolution=0.15,
+        spawn_bank_size=128,
     )
 
     # ====================================================================

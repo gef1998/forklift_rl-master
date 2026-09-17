@@ -1,4 +1,4 @@
-"""Isaac Sim 实现：10 m 随机圆柱/方柱课程场景。"""
+"""Isaac Sim 实现：随机连通内墙与圆柱/方柱联合生成场景。"""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import math
 import random
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 import trimesh
 
 import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
+
+from .structured_random_geometry import sample_connected_layout
 
 from .random_obstacle_geometry import (
     alternating_obstacle_types,
@@ -49,6 +52,25 @@ class RandomObstacleWorldConfig:
     obstacle_candidate_count: int = 32
     spawn_candidate_count: int = 96
 
+    # One procedural distribution: connected wall graph + independently sampled clutter.
+    structured_layout: bool = True
+    grid_size: int = 3
+    interior_wall_thickness: float = 0.15
+    wall_jitter: float = 0.20
+    loop_probability_range: tuple[float, float] = (0.0, 0.65)
+    clutter_density_range: tuple[float, float] = (0.35, 1.0)
+    navigation_clearance: float = 0.60
+    connectivity_grid_resolution: float = 0.15
+    spawn_bank_size: int = 128
+
+    @property
+    def num_wall_slots(self) -> int:
+        return 2 * self.grid_size * (self.grid_size - 1) if self.structured_layout else 0
+
+    @property
+    def interior_wall_length(self) -> float:
+        return (self.arena_size - 2 * self.wall_thickness) / self.grid_size
+
     _obstacle_types: list[str] = field(default_factory=list)
     _obstacle_radii: list[float] = field(default_factory=list)
     _obstacle_cube_sizes: list[tuple[float, float]] = field(default_factory=list)
@@ -86,6 +108,19 @@ def spawn_random_obstacle_world(cfg: RandomObstacleWorldConfig) -> None:
         )
         path = f"/World/envs/env_0/RandomObstacleWorld_{name}"
         wall_cfg.func(path, wall_cfg, translation=(cx, cy, cfg.wall_height / 2.0))
+        _ensure_collision_api(path)
+
+    for index in range(cfg.num_wall_slots):
+        wall_cfg = sim_utils.CuboidCfg(
+            size=(cfg.interior_wall_length, cfg.interior_wall_thickness, cfg.wall_height),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=True, kinematic_enabled=True
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.40, 0.45, 0.50)),
+        )
+        path = f"/World/envs/env_0/RandomInteriorWall_{index}"
+        wall_cfg.func(path, wall_cfg, translation=(0.0, 0.0, -100.0))
         _ensure_collision_api(path)
 
     cfg._obstacle_types = []
@@ -167,7 +202,40 @@ class RandomObstacleWorldManager:
         )
         self.yaws = torch.zeros(num_envs, self.num_obstacles, device=device)
 
+        self.active = torch.ones(num_envs, self.num_obstacles, dtype=torch.bool, device=device)
+        self.wall_poses = torch.zeros(num_envs, cfg.num_wall_slots, 3, device=device)
+        self.wall_active = torch.zeros(num_envs, cfg.num_wall_slots, dtype=torch.bool, device=device)
+        self.spawn_pairs = None
+
     def sample_initial_layout(self) -> None:
+        if self.cfg.structured_layout:
+            # Draw seeds from Torch so the existing training seed also controls CPU geometry.
+            seeds = torch.randint(0, 2**31 - 1, (self.num_envs,), device=self.device).cpu().tolist()
+            cfg = self.cfg
+            layouts = [sample_connected_layout(
+                cfg._obstacle_bound_radii, seed=seed, arena_size=cfg.arena_size,
+                wall_thickness=cfg.wall_thickness, grid_size=cfg.grid_size,
+                interior_wall_thickness=cfg.interior_wall_thickness,
+                wall_jitter=cfg.wall_jitter, loop_probability_range=cfg.loop_probability_range,
+                clutter_density_range=cfg.clutter_density_range,
+                min_obstacle_spacing=cfg.min_obstacle_spacing,
+                obstacle_wall_clearance=cfg.obstacle_wall_clearance,
+                navigation_clearance=cfg.navigation_clearance,
+                grid_resolution=cfg.connectivity_grid_resolution,
+                emma_clearance=cfg.emma_spawn_clearance_radius,
+                goal_clearance=cfg.goal_spawn_clearance_radius,
+                min_goal_distance=cfg.goal_min_distance, spawn_bank_size=cfg.spawn_bank_size,
+            ) for seed in seeds]
+            for name in ("positions", "active", "wall_poses", "wall_active"):
+                target = getattr(self, name)
+                target.copy_(torch.as_tensor(np.stack([layout[name] for layout in layouts]),
+                                             device=self.device, dtype=target.dtype))
+            self.spawn_pairs = torch.as_tensor(
+                np.stack([layout["spawn_pairs"] for layout in layouts]),
+                device=self.device, dtype=self.positions.dtype,
+            )
+            self.yaws.uniform_(0, 2 * math.pi)
+            return
         self.positions.copy_(
             sample_random_obstacle_positions(
                 self.num_envs,
@@ -206,7 +274,9 @@ class RandomObstacleWorldManager:
             state_view[:, 0, 0:2] = (
                 self.positions[:, obstacle_index] + env_origins_xy
             )
-            state_view[:, 0, 2] = self.heights[obstacle_index] / 2.0
+            state_view[:, 0, 2] = torch.where(
+                self.active[:, obstacle_index], self.heights[obstacle_index] / 2.0, -100.0
+            )
             state_view[:, 0, 3:7] = 0.0
             yaw = self.yaws[:, obstacle_index]
             state_view[:, 0, 3] = torch.cos(yaw / 2.0)
@@ -214,9 +284,31 @@ class RandomObstacleWorldManager:
             state_view[:, 0, 7:13] = 0.0
             obstacle.write_root_state_to_sim(state)
 
+        for index in range(self.cfg.num_wall_slots):
+            wall = scene.rigid_objects[f"random_interior_wall_{index}"]
+            state = wall.data.default_root_state.clone()
+            view = state.view(self.num_envs, -1, 13)
+            view[:, 0, :2] = self.wall_poses[:, index, :2] + env_origins_xy
+            view[:, 0, 2] = torch.where(self.wall_active[:, index], self.cfg.wall_height / 2, -100.0)
+            view[:, 0, 3:13] = 0
+            yaw = self.wall_poses[:, index, 2]
+            view[:, 0, 3] = torch.cos(yaw / 2)
+            view[:, 0, 6] = torch.sin(yaw / 2)
+            wall.write_root_state_to_sim(state)
+
     def sample_spawn_pairs(
         self, env_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.cfg.structured_layout:
+            if self.spawn_pairs is None:
+                raise RuntimeError("sample_initial_layout must precede spawn sampling")
+            choice = torch.randint(self.cfg.spawn_bank_size, (env_ids.numel(),), device=self.device)
+            pairs = self.spawn_pairs[env_ids, choice]
+            emma, goal = pairs[:, 0], pairs[:, 1]
+            yaw = torch.rand(env_ids.numel(), device=self.device) * (2 * math.pi)
+            emma_region = (emma[:, 0] >= 0).long() + 2 * (emma[:, 1] < 0).long()
+            goal_region = (goal[:, 0] >= 0).long() + 2 * (goal[:, 1] < 0).long()
+            return emma, yaw, goal, emma_region, goal_region
         return sample_safe_spawn_pairs(
             self.positions[env_ids],
             self.bound_radii,
@@ -250,7 +342,20 @@ class RandomObstacleWorldManager:
                 )
                 meshes.append(wall)
 
+            for index in range(self.cfg.num_wall_slots):
+                if not self.wall_active[env_index, index].item():
+                    continue
+                x, y, yaw = self.wall_poses[env_index, index].cpu().tolist()
+                wall = trimesh.creation.box(extents=[self.cfg.interior_wall_length,
+                                                    self.cfg.interior_wall_thickness,
+                                                    self.cfg.wall_height])
+                wall.apply_transform(trimesh.transformations.rotation_matrix(yaw, [0, 0, 1]))
+                wall.apply_translation([origin_x + x, origin_y + y, self.cfg.wall_height / 2])
+                meshes.append(wall)
+
             for obstacle_index in range(self.num_obstacles):
+                if not self.active[env_index, obstacle_index].item():
+                    continue
                 height = float(self.heights[obstacle_index].item())
                 world_x = float(self.positions[env_index, obstacle_index, 0].item()) + origin_x
                 world_y = float(self.positions[env_index, obstacle_index, 1].item()) + origin_y

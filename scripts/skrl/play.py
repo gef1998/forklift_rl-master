@@ -28,6 +28,10 @@ parser.add_argument("--num_envs", type=int, default=1, help="Number of environme
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument(
+    "--seed", type=int, default=None,
+    help="Random seed for playback and map generation; omitted means a fresh seed each launch.",
+)
+parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
@@ -160,6 +164,7 @@ import time
 import torch
 
 import skrl
+from skrl.utils import set_seed
 from packaging import version
 
 # check for minimum supported skrl version
@@ -604,6 +609,11 @@ def main():
     env_cfg = parse_env_cfg(
         args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
     )
+    # Seed skrl BEFORE constructing its wrapper: it caches config.torch/jax.key
+    # and passes that key to the environment's first reset (otherwise seed=0).
+    play_seed = set_seed(args_cli.seed)
+    env_cfg.seed = play_seed
+    print(f"[INFO] Playback/map seed: {play_seed} (reproduce with --seed {play_seed})", flush=True)
     # play 始终写入部署 LiDAR 参数，避免配置文件版本不一致时静默跳过 mask。
     env_cfg.lidar_observation_forward_half_fov_deg = (
         args_cli.lidar_forward_half_fov_deg
@@ -657,6 +667,10 @@ def main():
             experiment_cfg = load_cfg_from_registry(
                 args_cli.task, "skrl_cfg_entry_point"
             )
+
+        # Runner reseeds Python/NumPy/Torch before the first reset, where the map
+        # is sampled. Keep it aligned with the environment instead of YAML seed=42.
+        experiment_cfg["seed"] = play_seed
 
         # specify directory for logging experiments (load checkpoint)
         log_root_path = os.path.join(

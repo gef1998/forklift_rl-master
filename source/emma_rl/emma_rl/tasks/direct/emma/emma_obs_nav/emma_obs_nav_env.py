@@ -182,6 +182,14 @@ class EmmaObsNavEnv(DirectRLEnv):
                     "random_obstacles Emma spawn clearance must cover the "
                     "robot half diagonal"
                 )
+            if (
+                random_world_cfg.structured_layout
+                and random_world_cfg.navigation_clearance
+                < robot_half_diagonal + cfg.collision_clearance_threshold
+            ):
+                raise ValueError(
+                    "random_obstacles navigation clearance must cover the robot and collision margin"
+                )
             if random_world_cfg.goal_min_distance <= 5.0:
                 raise ValueError(
                     "random_obstacles Emma-to-goal distance must be strictly "
@@ -796,7 +804,8 @@ class EmmaObsNavEnv(DirectRLEnv):
             )
 
             spawn_random_obstacle_world(self.cfg.random_obstacle_world)
-            obstacle_count = 4 + self.cfg.random_obstacle_world.num_obstacles
+            obstacle_count = (4 + self.cfg.random_obstacle_world.num_obstacles
+                              + self.cfg.random_obstacle_world.num_wall_slots)
         elif self._world_mode == "corridor":
             spawn_s_corridor(self.cfg.corridor_world)
             obstacle_count = 6
@@ -899,6 +908,10 @@ class EmmaObsNavEnv(DirectRLEnv):
                 )
                 self.scene.rigid_objects[f"random_obstacle_{i}"] = (
                     RigidObject(obstacle_cfg)
+                )
+            for i in range(self.cfg.random_obstacle_world.num_wall_slots):
+                self.scene.rigid_objects[f"random_interior_wall_{i}"] = RigidObject(
+                    RigidObjectCfg(prim_path=f"/World/envs/env_.*/RandomInteriorWall_{i}", spawn=None)
                 )
         elif self._world_mode == "corridor":
             for asset_name, prim_name in (
@@ -2420,7 +2433,7 @@ class EmmaObsNavEnv(DirectRLEnv):
                 print(
                     f"[RandomObstacles] initial: "
                     f"{self.cfg.random_obstacle_world.num_obstacles} "
-                    f"mixed obstacles × "
+                    f"clutter slots + {self.cfg.random_obstacle_world.num_wall_slots} wall slots × "
                     f"{self.num_envs} envs, edge_spacing>="
                     f"{self.cfg.random_obstacle_world.min_obstacle_spacing:.2f}m"
                 )
