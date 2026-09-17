@@ -31,6 +31,7 @@ from .emma_obs_nav_corridor_world import CorridorWorldConfig
 from .emma_obs_nav_random_obstacle_world import RandomObstacleWorldConfig
 from .emma_obs_nav_straight_obstacle_world import StraightObstacleWorldConfig
 from .emma_obs_nav_world import ObstacleWorldConfig
+from .navigation_curriculum import NavigationCurriculumCfg
 from .emma_obs_nav_warehouse_world import WarehouseWorldConfig
 
 
@@ -39,7 +40,7 @@ from .emma_obs_nav_warehouse_world import WarehouseWorldConfig
 # ====================================================================
 @dataclass
 class DomainRandCfg:
-    """域随机化配置 — 各维度可独立开关, 配合 phase 噪声课程使用."""
+    """域随机化配置 — 各维度可独立开关，倍率由每回合的课程等级决定。"""
 
     # ---- 感知噪声 (step-level, 加在 raw LiDAR distance 上, min-pool 前) ----
     enable_lidar_noise: bool = True
@@ -95,7 +96,7 @@ _EMMA_USD = resolve_asset("Emma_no_ground.usd", override_env="EMMA_USD_PATH")
 
 @configclass
 class EmmaObsNavEnvCfg(DirectRLEnvCfg):
-    """Emma AMR 二轮差速避障导航 — 3 阶段课程."""
+    """Emma AMR 二轮差速避障导航 — 四级自适应任务与噪声课程。"""
 
     # ---- Environment ----
     decimation = 2
@@ -255,10 +256,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     goal_spawn_half: float = 2.0            # 目标点生成范围 ±2m
 
     # ====================================================================
-    # Random-obstacle world（课程第一阶段）
+    # Random-obstacle world（三级几何任务，加一级噪声鲁棒性课程）
     #   同一生成分布：随机连通内墙图 + 随机回环 + 圆柱/方柱散障。
     #   自然组合 S 型、回型和直行绕障，不切换固定场景模板。
-    #   散障间净距 >= 1.5 m；起终点位于膨胀后的同一连通域，距离 > 5.2 m。
+    #   散障间净距 >= 1.5 m；起终点位于膨胀后的同一连通域。
+    #   课程：1.5~3 m 直达 → 3~5.2 m 优先绕障 → 完整任务 > 5.2 m。
     #   每个并行环境初始化独立地图，reset 从该地图的安全点对库采样。
     # ====================================================================
     random_obstacle_world: RandomObstacleWorldConfig = RandomObstacleWorldConfig(
@@ -297,14 +299,14 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # ====================================================================
     obs_world: ObstacleWorldConfig = ObstacleWorldConfig(
         arena_size=10.0,
-        num_obstacles=20,          # 模板总数 = max(phase*_num_obstacles)
+        num_obstacles=4,          # 非课程评估场景，障碍数量显式固定
         radius_min=0.10,
         radius_max=0.15,
         cube_size_min=0.10,
         cube_size_max=0.20,
         height_min=1.0,
         height_max=1.2,
-        min_obs_spacing=0.60,
+        min_obs_spacing=0.90,
         wall_thickness=0.15,
         interior_wall_thickness=0.15,
         wall_height=1.0,
@@ -370,11 +372,9 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         emma_goal_max_dist=10.0,        # 满速直达至多约 11.1s
     )
 
-    # ---- Phase 圆柱数 (warehouse mode) ----
-    # 16m 场地已包含 15 段货架；圆柱按课程逐步增加，避免沿用 30m 场地数量造成拥塞。
-    phase1_num_cylinders: int = 8       # 约 1cyl / 32m²
-    phase2_num_cylinders: int = 12      # 约 1cyl / 21m²
-    phase3_num_cylinders: int = 16      # 约 1cyl / 16m²
+    # ---- 固定圆柱数 (warehouse mode) ----
+    # 16m 场地已包含 15 段货架；使用固定圆柱数量，回合中不改动地图。
+    warehouse_num_cylinders: int = 8
 
     # ---- 域随机化 ----
     domain_rand: DomainRandCfg = DomainRandCfg()
@@ -431,34 +431,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     )
 
     # ====================================================================
-    # Phase control (3 阶段课程)
+    # 根据表现升降级；仅 structured random_obstacles 启用自适应任务课程。
+    # 地图保持固定；新回合选择难度与噪声，旧回合不受升级影响。
     # ====================================================================
-    training_phase: int = 1
+    curriculum: NavigationCurriculumCfg = NavigationCurriculumCfg()
 
-    # ---- Phase 1 (稀疏): 学习四角任务、内墙绕行和基础避障 ----
-    phase1_obs_spacing: float = 0.90
-    phase1_num_obstacles: int = 4
-
-    # ---- Phase 2 (中等): 走廊和中央区域加入更多混合障碍 ----
-    phase2_obs_spacing: float = 0.60
-    phase2_num_obstacles: int = 12
-
-    # ---- Phase 3 (密集): 保持关键开口可通行，提高布局多样性 ----
-    phase3_obs_spacing: float = 0.40
-    phase3_num_obstacles: int = 20
-
-    # ---- 噪声课程: 每 phase 内线性 ramp ----
-    #       Phase 1: noise 0.0 → 0.3
-    #       Phase 2: noise 0.4 → 0.6
-    #       Phase 3: noise 0.7 → 1.0
-    phase_steps: int = 1200000                 # 每 phase 的 step 数 (用于计算 ramp progress)
-    phase1_noise_start: float = 0.1
-    phase1_noise_end: float = 0.3
-    phase2_noise_start: float = 0.4
-    phase2_noise_end: float = 0.6
-    phase3_noise_start: float = 0.7
-    phase3_noise_end: float = 1.0
-    
     # ====================================================================
     # Reward — 直接面向任务的六项奖励，无 VFH 教师
     # ====================================================================

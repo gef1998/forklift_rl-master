@@ -72,6 +72,64 @@ def largest_component(mask):
     return np.asarray(best, dtype=np.int64).reshape(-1, 2)
 
 
+def straight_path_is_clear(pairs, positions, radii, active, wall_poses,
+                           wall_active, wall_length, wall_width, clearance):
+    """Conservative swept-disc LOS check: circles and inflated wall boxes."""
+    start, end = pairs[:, 0], pairs[:, 1]
+    delta = end - start
+    length_sq = np.square(delta).sum(axis=-1).clip(1e-12)
+    safe = np.ones(len(pairs), dtype=bool)
+    for center, radius in zip(positions[active], radii[active]):
+        t = ((center - start) * delta).sum(axis=-1) / length_sq
+        nearest = start + t.clip(0, 1)[:, None] * delta
+        safe &= np.linalg.norm(nearest - center, axis=-1) >= radius + clearance
+    half = np.array([wall_length / 2, wall_width / 2]) + clearance
+    for x, y, yaw in wall_poses[wall_active]:
+        c, s = math.cos(yaw), math.sin(yaw)
+        rotation = np.array([[c, -s], [s, c]])
+        local_start = (start - (x, y)) @ rotation
+        local_delta = delta @ rotation
+        parallel = np.abs(local_delta) < 1e-10
+        parallel_outside = (parallel & (np.abs(local_start) > half)).any(axis=-1)
+        divisor = np.where(parallel, 1.0, local_delta)
+        t1, t2 = (-half - local_start) / divisor, (half - local_start) / divisor
+        enter = np.where(parallel, -np.inf, np.minimum(t1, t2)).max(axis=-1)
+        leave = np.where(parallel, np.inf, np.maximum(t1, t2)).min(axis=-1)
+        intersects = ~parallel_outside & (enter <= leave) & (leave >= 0) & (enter <= 1)
+        safe &= ~intersects
+    return safe
+
+
+def _curriculum_banks(starts, goals, full_pairs, rng, geometry, distance_ranges):
+    banks = []
+    count = len(full_pairs)
+    for level, (low, high) in enumerate(distance_ranges):
+        collected = []
+        remaining = count
+        for _ in range(32):
+            a = starts[rng.integers(len(starts), size=count * 16)]
+            b = goals[rng.integers(len(goals), size=len(a))]
+            distance = np.linalg.norm(a - b, axis=-1)
+            valid = (distance >= low) & (distance <= high)
+            pairs = np.stack((a[valid], b[valid]), axis=1)
+            clear = straight_path_is_clear(pairs, **geometry)
+            if level == 0:
+                pairs = pairs[clear]
+            else:
+                # Prefer direct-line obstruction when available, but keep open
+                # layouts valid: geometry is never fabricated to fill a quota.
+                pairs = np.concatenate((pairs[~clear], pairs[clear]))
+            pairs = pairs[:remaining]
+            collected.append(pairs)
+            remaining -= len(pairs)
+            if not remaining:
+                banks.append(np.concatenate(collected))
+                break
+        if remaining:
+            return None
+    return np.stack((*banks, full_pairs))
+
+
 def sample_connected_layout(radii, *, seed, arena_size=10.0, wall_thickness=.15,
                             grid_size=3, interior_wall_thickness=.15,
                             wall_jitter=.20, loop_probability_range=(.0, .65),
@@ -80,7 +138,8 @@ def sample_connected_layout(radii, *, seed, arena_size=10.0, wall_thickness=.15,
                             navigation_clearance=.60, grid_resolution=.15,
                             emma_clearance=.70, goal_clearance=.60,
                             min_goal_distance=5.2, spawn_bank_size=128,
-                            max_layout_attempts=32):
+                            max_layout_attempts=32, include_curriculum_banks=False,
+                            curriculum_distance_ranges=((1.5, 3.0), (3.0, 5.2))):
     """Sample one joint layout and bank of safe, connected start/goal pairs.
 
     Fixed-size slots simplify physics cloning. Inactive clutter/walls are hidden
@@ -91,6 +150,11 @@ def sample_connected_layout(radii, *, seed, arena_size=10.0, wall_thickness=.15,
     radii = np.asarray(radii, dtype=np.float64)
     if radii.ndim != 1 or not np.isfinite(radii).all() or (radii <= 0).any():
         raise ValueError("radii must be a finite positive vector")
+    if len(curriculum_distance_ranges) != 2 or any(
+        len(r) != 2 or not 0 < r[0] < r[1] or not all(map(math.isfinite, r))
+        for r in curriculum_distance_ranges
+    ):
+        raise ValueError("two positive curriculum distance ranges are required")
     if not isinstance(grid_size, int) or grid_size < 2:
         raise ValueError("grid_size must be an integer >= 2")
     for value in (arena_size, wall_thickness, interior_wall_thickness,
@@ -189,8 +253,19 @@ def sample_connected_layout(radii, *, seed, arena_size=10.0, wall_thickness=.15,
             banks.append(pairs)
             remaining -= len(pairs)
             if not remaining:
-                return dict(positions=positions, active=active, wall_poses=wall_poses,
-                            wall_active=wall_active, spawn_pairs=np.concatenate(banks),
-                            open_edges=edges[~wall_active], grid_step=step,
-                            navigation_clearance=navigation_clearance)
+                layout = dict(positions=positions, active=active, wall_poses=wall_poses,
+                              wall_active=wall_active, spawn_pairs=np.concatenate(banks),
+                              open_edges=edges[~wall_active], grid_step=step,
+                              navigation_clearance=navigation_clearance)
+                if include_curriculum_banks:
+                    course_banks = _curriculum_banks(
+                        starts, goals, layout["spawn_pairs"], rng,
+                        dict(positions=positions, radii=radii, active=active,
+                             wall_poses=wall_poses, wall_active=wall_active,
+                             wall_length=pitch, wall_width=interior_wall_thickness,
+                             clearance=navigation_clearance), curriculum_distance_ranges)
+                    if course_banks is None:
+                        break  # Retry the joint map, never silently weaken stage constraints.
+                    layout["curriculum_pairs"] = course_banks
+                return layout
     raise RuntimeError("unable to generate connected random layout; relax density/clearances")

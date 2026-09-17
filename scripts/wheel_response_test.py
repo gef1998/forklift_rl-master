@@ -82,7 +82,7 @@ def _diagnostic_metadata(base_env, step_dt: float) -> dict[str, object]:
         ),
         "action_control_mode": str(cfg.action_control_mode),
         "step_mode": "physics_only",
-        "active_obstacles": int(cfg.phase1_num_obstacles),
+        "active_obstacles": int(cfg.random_obstacle_world.num_obstacles if cfg.world_mode == "random_obstacles" else cfg.obs_world.num_obstacles),
         "safety_enabled": bool(cfg.safety_control.enabled),
         "domain_randomization": {
             "lidar_noise": bool(cfg.domain_rand.enable_lidar_noise),
@@ -258,8 +258,10 @@ def main() -> None:
     env_cfg.domain_rand.enable_dynamics_noise = False
     env_cfg.domain_rand.enable_action_noise = False
     # 轮速响应不测试避障，移除活动障碍，避免接触力污染执行器跟踪结果。
-    env_cfg.phase1_num_obstacles = 0
-    env_cfg.training_phase = 1
+    env_cfg.obs_world.num_obstacles = 0
+    env_cfg.random_obstacle_world.num_obstacles = 0
+    env_cfg.random_obstacle_world.structured_layout = False
+    env_cfg.curriculum.enabled = False
     env_cfg.lidar_sensor_mode = "synchronous"
     env_cfg.lidar_latency_range_s = (0.0, 0.0)
     env_cfg.lidar_jitter_max_steps = 0

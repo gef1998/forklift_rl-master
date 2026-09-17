@@ -591,6 +591,8 @@ def main():
     # and passes that key to the environment's first reset (otherwise seed=0).
     play_seed = set_seed(args_cli.seed)
     env_cfg.seed = play_seed
+    if hasattr(env_cfg, "curriculum"):
+        env_cfg.curriculum.enabled = False  # Fixed full-task evaluation, including multi-env play.
     print(f"[INFO] Playback/map seed: {play_seed} (reproduce with --seed {play_seed})", flush=True)
     # play 始终写入部署 LiDAR 参数，避免配置文件版本不一致时静默跳过 mask。
     env_cfg.lidar_observation_forward_half_fov_deg = (
@@ -711,6 +713,8 @@ def main():
             Runner._generate_models = generate_custom_model
         del experiment_cfg["models"]["custom"]
         runner = Runner(env, experiment_cfg)
+        if hasattr(base_env, "_curriculum"):
+            runner.agent.checkpoint_modules["curriculum"] = base_env._curriculum
 
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
         runner.agent.load(resume_path)

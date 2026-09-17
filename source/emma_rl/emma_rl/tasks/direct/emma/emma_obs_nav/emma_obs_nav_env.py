@@ -59,6 +59,7 @@ from .emma_obs_nav_straight_obstacle_world import (
 )
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
 from .navigation_rewards import navigation_reward_terms
+from .navigation_curriculum import NavigationCurriculum
 from .safety_control import apply_safety_control
 
 
@@ -324,8 +325,16 @@ class EmmaObsNavEnv(DirectRLEnv):
                 device=self.device,
             )
 
-        # ---- Phase tracking (detect phase change → resample layouts) ----
-        self._active_phase: int = self.cfg.training_phase
+        self._curriculum = NavigationCurriculum(
+            self.cfg.curriculum,
+            supported=(self._world_mode == "random_obstacles"
+                       and self.cfg.random_obstacle_world.structured_layout),
+        )
+        self._episode_task_level = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._episode_curriculum_generation = torch.zeros_like(self._episode_task_level)
+        self._episode_noise_scale = torch.zeros(self.num_envs, device=self.device)
+        self._curriculum_noise_ranges = torch.tensor(
+            self.cfg.curriculum.noise_ranges, device=self.device)
         self._warp_mesh_dirty: bool = False
         self._lidar_mesh_ready: bool = False
 
@@ -640,7 +649,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             from .emma_obs_nav_warehouse_world import spawn_warehouse
             spawn_warehouse(self.num_envs, self._warehouse_cfg)
             # 圆柱模板 (动态数量)
-            num_cyl = self.cfg.phase3_num_cylinders
+            num_cyl = self.cfg.warehouse_num_cylinders
             rng = self._warehouse_cfg
             radii = [random.uniform(rng.cylinder_radius_min, rng.cylinder_radius_max)
                      for _ in range(num_cyl)]
@@ -842,86 +851,34 @@ class EmmaObsNavEnv(DirectRLEnv):
                 pass
 
     # ==================================================================
-    # Phase parameters
+    # Per-episode curriculum and domain randomization
     # ==================================================================
-    def _get_phase_params(self) -> dict:
-        """根据 common_step_counter 自动推进 phase.
-
-        Phase 1: steps 0 ~ phase_steps
-        Phase 2: steps phase_steps ~ 2*phase_steps
-        Phase 3: steps 2*phase_steps+ (持续)
-        """
-        cfg = self.cfg
-        step = self.common_step_counter
-        if step < cfg.phase_steps:
-            phase = 1
-        elif step < 2 * cfg.phase_steps:
-            phase = 2
+    def _assign_episode_curriculum(self, env_ids: torch.Tensor) -> None:
+        """Choose tasks and noise once at reset; in-flight episodes never change."""
+        course = self._curriculum
+        n = env_ids.numel()
+        levels = torch.full((n,), course.level, dtype=torch.long, device=self.device)
+        if course.enabled and course.level > 0:
+            replay = torch.rand(n, device=self.device) < self.cfg.curriculum.replay_probability
+            easier = torch.randint(course.level, (n,), device=self.device)
+            levels = torch.where(replay, easier, levels)
+        self._episode_task_level[env_ids] = levels
+        self._episode_curriculum_generation[env_ids] = course.generation
+        if course.enabled:
+            ranges = self._curriculum_noise_ranges[levels]
+            noise = ranges[:, 0] + torch.rand(n, device=self.device) * (ranges[:, 1] - ranges[:, 0])
         else:
-            phase = 3
+            noise = torch.full((n,), self.cfg.curriculum.evaluation_noise_scale, device=self.device)
+        self._episode_noise_scale[env_ids] = noise
 
-        # 检测 phase 切换 (用于触发障碍物重采样)
-        if phase != self._active_phase:
-            self._active_phase = phase
-            # 随机障碍布局在训练开始时生成一次。phase 只推进噪声课程，
-            # 不重采样布局，避免大规模环境频繁重建 LiDAR mesh。
-            if self._world_mode not in (
-                "random_obstacles",
-                "corridor",
-                "straight_obstacle",
-            ):
-                self._warp_mesh_dirty = True
-
-        pfx = f"phase{phase}"
-        if self._world_mode == "warehouse":
-            num_obs = getattr(cfg, f"{pfx}_num_cylinders")
-        elif self._world_mode == "random_obstacles":
-            num_obs = cfg.random_obstacle_world.num_obstacles
-        elif self._world_mode in ("corridor", "straight_obstacle"):
-            num_obs = 0
-        else:
-            num_obs = getattr(cfg, f"{pfx}_num_obstacles")
-        return {
-            "phase": phase,
-            "obs_spacing": (
-                cfg.random_obstacle_world.min_obstacle_spacing
-                if self._world_mode == "random_obstacles"
-                else getattr(cfg, f"{pfx}_obs_spacing")
-            ),
-            "num_obstacles": num_obs,
-        }
-
-    def _get_noise_scale(self) -> float:
-        """基于当前 phase 和 phase 内进度, 返回噪声倍率 [0, 1].
-
-        Phase 1: 0.0 → 0.3, Phase 2: 0.4 → 0.6, Phase 3: 0.7 → 1.0
-        Play 模式 (num_envs==1): 固定返回 0, 关闭所有 DR.
-        """
-        if self.num_envs == 1:
-            return 0.0  # play mode: no DR
-
-        cfg = self.cfg
-        # 与 _get_phase_params 一致的 phase 计算 (不触发副作用)
-        step = self.common_step_counter
-        if step < cfg.phase_steps:
-            p = 1
-        elif step < 2 * cfg.phase_steps:
-            p = 2
-        else:
-            p = 3
-
-        noise_start = getattr(cfg, f"phase{p}_noise_start")
-        noise_end = getattr(cfg, f"phase{p}_noise_end")
-        phase_start_step = (p - 1) * cfg.phase_steps
-        steps_in_phase = step - phase_start_step
-        progress = min(1.0, max(0.0, steps_in_phase / cfg.phase_steps))
-        return noise_start + (noise_end - noise_start) * progress
+    def _get_noise_scale(self) -> torch.Tensor:
+        return self._episode_noise_scale
 
     def _sample_domain_rand(self, env_ids: torch.Tensor):
         """采样 episode 级 DR 参数 (在 _reset_idx 中调用)."""
         dr = self.cfg.domain_rand
         n = len(env_ids)
-        ns = self._get_noise_scale()  # 课程倍率
+        ns = self._get_noise_scale()[env_ids]  # 课程倍率
 
         if dr.enable_dynamics_noise:
             self._dr_mass_scale[env_ids] = 1.0 + ns * (
@@ -950,10 +907,10 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._dr_com_offset[env_ids] = 0.0
 
         if dr.enable_action_noise:
-            max_delay = int(dr.action_delay_max_steps * ns)
-            self._dr_action_delay[env_ids] = torch.randint(
-                0, max_delay + 1, (n,), device=self.device, dtype=torch.long,
-            )
+            max_delay = torch.floor(dr.action_delay_max_steps * ns)
+            self._dr_action_delay[env_ids] = torch.floor(
+                torch.rand(n, device=self.device) * (max_delay + 1)
+            ).long()
             self._action_delay_buf[env_ids] = 0.0
             self._action_delay_idx[env_ids] = 0
         else:
@@ -990,7 +947,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._policy_actions[:n] = actions
 
         # ---- Action delay (ring buffer) ----
-        if dr.enable_action_noise and ns > 0:
+        if dr.enable_action_noise:
             buf_size = self._action_delay_buf.shape[1]
             idx = self._action_delay_idx[:n] % buf_size
             self._action_delay_buf[torch.arange(n, device=self.device), idx] = actions
@@ -1002,8 +959,8 @@ class EmmaObsNavEnv(DirectRLEnv):
                 torch.arange(n, device=self.device), read_idx].clone()
 
         # ---- Action noise (高斯) ----
-        if dr.enable_action_noise and dr.action_noise_std > 0 and ns > 0:
-            noise = torch.randn_like(actions) * dr.action_noise_std * ns
+        if dr.enable_action_noise and dr.action_noise_std > 0:
+            noise = torch.randn_like(actions) * dr.action_noise_std * ns[:n, None]
             actions = (actions + noise).clamp(-1.0, 1.0)
 
         self.actions[:n] = actions.clone()
@@ -1021,8 +978,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         )
 
         # Wheel slip noise (friction proxy)
-        if dr.enable_dynamics_noise and dr.wheel_slip_noise_std > 0 and ns > 0:
-            slip = torch.randn(n, device=self.device) * dr.wheel_slip_noise_std * ns
+        if dr.enable_dynamics_noise and dr.wheel_slip_noise_std > 0:
+            slip = torch.randn(n, device=self.device) * dr.wheel_slip_noise_std * ns[:n]
             raw_wheels = raw_wheels * (1.0 + slip.unsqueeze(-1))
 
         feasible_wheels, projection_scale = project_wheel_velocities_to_motion_limits(
@@ -1210,8 +1167,15 @@ class EmmaObsNavEnv(DirectRLEnv):
                 "expected 'synchronous', 'fixed', or 'random'"
             )
 
+        noise = self._episode_noise_scale[env_ids]
+        if mode == "random":
+            if cfg.lidar_fixed_frequency_hz <= 0:
+                raise ValueError("nominal lidar_fixed_frequency_hz must be positive")
+            nominal_period = 1.0 / cfg.lidar_fixed_frequency_hz
+            periods = nominal_period + noise * (periods - nominal_period)
+            phase = torch.rand(n, device=self.device) * periods
         self._sensor_period[env_ids] = periods
-        self._sensor_latency[env_ids] = latency
+        self._sensor_latency[env_ids] = latency * noise
         self._next_sensor_timestamp[env_ids] = current_time[env_ids] + phase
         self._sensor_schedule_initialized[env_ids] = True
 
@@ -1303,7 +1267,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         return self._safety_clearance
 
     def _capture_lidar_sector_ranges(
-        self, noise_scale: float
+        self, noise_scale: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Capture policy and shield sectors from the same physical scan.
 
@@ -1315,9 +1279,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         dr = cfg.domain_rand
         clean_ranges, valid = self._sample_clean_lidar_ranges()
         raw_ranges = clean_ranges.clone()
-        if dr.enable_lidar_noise and noise_scale > 0:
+        if dr.enable_lidar_noise:
             noisy = raw_ranges + (
-                torch.randn_like(raw_ranges) * dr.lidar_noise_std * noise_scale)
+                torch.randn_like(raw_ranges) * dr.lidar_noise_std * noise_scale[:, None])
             raw_ranges = torch.where(valid, noisy, raw_ranges)
         raw_ranges = raw_ranges.clamp(min=0.0, max=cfg.lidar_max_distance)
 
@@ -1329,8 +1293,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         )
         shield_sector_ranges = sector_ranges.clone()
         shield_sector_angles = sector_angles.clone()
-        if dr.enable_lidar_dropout and noise_scale > 0:
-            dropout_prob = dr.lidar_dropout_prob * noise_scale
+        if dr.enable_lidar_dropout:
+            dropout_prob = dr.lidar_dropout_prob * noise_scale[:, None]
             sector_dropout = torch.rand_like(sector_ranges) < dropout_prob
             sector_ranges = torch.where(
                 sector_dropout,
@@ -1412,7 +1376,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         self,
         current_sensor_pose: torch.Tensor,
         current_time: torch.Tensor,
-        noise_scale: float,
+        noise_scale: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Generate, queue, deliver, and warp asynchronous LiDAR observations."""
         cfg = self.cfg
@@ -1434,7 +1398,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             ) = self._capture_lidar_sector_ranges(noise_scale)
             accepted = generate_mask.clone()
             if cfg.lidar_sensor_mode.lower() != "synchronous" and cfg.lidar_scan_dropout_prob > 0:
-                scan_dropout = torch.rand(self.num_envs, device=self.device) < cfg.lidar_scan_dropout_prob
+                scan_dropout = torch.rand(self.num_envs, device=self.device) < cfg.lidar_scan_dropout_prob * noise_scale
                 accepted &= ~scan_dropout
             # Reset always receives one immediate observation so the initial
             # policy state is defined; later dropout behaves normally.
@@ -1461,7 +1425,7 @@ class EmmaObsNavEnv(DirectRLEnv):
                     jitter_limit + 1,
                     (self.num_envs,),
                     device=self.device,
-                )
+                ) * noise_scale
             self._next_sensor_timestamp = advance_sensor_schedule(
                 current_time,
                 self._next_sensor_timestamp,
@@ -1725,7 +1689,6 @@ class EmmaObsNavEnv(DirectRLEnv):
     # Reward
     # ==================================================================
     def _get_rewards(self) -> torch.Tensor:
-        self._get_phase_params()  # Advance the scene/noise curriculum only.
         nav_sum = self._compute_nav_rewards()
 
         if hasattr(self, "extras"):
@@ -1770,6 +1733,17 @@ class EmmaObsNavEnv(DirectRLEnv):
             for name, term in self._reward_terms.items():
                 log[f"Reward/{name}_mean"] = term.mean()
             log["Reward/total_mean"] = nav_sum.mean()
+            course = self._curriculum
+            log["Curriculum/level"] = course.level
+            log["Curriculum/noise_mean"] = self._episode_noise_scale.mean()
+            log["Curriculum/current_success_rate"] = course.last_success_rate
+            log["Curriculum/current_failure_rate"] = course.last_failure_rate
+            log["Curriculum/window_episodes"] = len(course.window)
+            log["Curriculum/level_steps"] = course.steps_since_change
+            log["Curriculum/current_episode_fraction"] = (
+                (self._episode_task_level == course.level)
+                & (self._episode_curriculum_generation == course.generation)
+            ).float().mean()
             log["Navigation/goal_distance_mean"] = self._last_goal_distance.mean()
             log["Navigation/minimum_clearance_mean"] = self._safety_clearance.amin(dim=-1).mean()
             log["Motion/forward_speed_mean"] = self._last_forward_speed.mean()
@@ -1829,6 +1803,7 @@ class EmmaObsNavEnv(DirectRLEnv):
     # Termination
     # ==================================================================
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._curriculum.advance()
         robot = self.robot
         cfg = self.cfg
 
@@ -1912,7 +1887,16 @@ class EmmaObsNavEnv(DirectRLEnv):
         if n_ended > 0:
             reason_names = {1: "timeout", 2: "fell", 3: "drifted",
                             4: "obstacle", 5: "goal_reached"}
-            ended_indices = torch.where(ending)[0].tolist()
+            ended_ids = torch.where(ending)[0]
+            outcomes = torch.stack((
+                self._episode_task_level[ended_ids], self._episode_curriculum_generation[ended_ids],
+                goal_reached[ended_ids].long(), self._failure_mask[ended_ids].long(),
+            ), dim=-1).cpu().tolist()
+            if self._curriculum.record(*zip(*outcomes)):
+                print(f"[Curriculum] level={self._curriculum.level} "
+                      f"success={self._curriculum.last_success_rate:.3f} "
+                      f"failure={self._curriculum.last_failure_rate:.3f}")
+            ended_indices = ended_ids.tolist()
             ended_reasons: list[int] = []
             for end_idx in ended_indices:
                 r = self._term_reason[end_idx].item()
@@ -1958,67 +1942,27 @@ class EmmaObsNavEnv(DirectRLEnv):
         env_origins_xy = self.scene.env_origins[env_ids, :2]
 
         # ---- 0. 采样 episode 级 DR 参数 ----
+        self._assign_episode_curriculum(env_ids)
         self._sample_domain_rand(env_ids)
 
-        # ---- 1. 障碍物布局 (phase 自动推进, 切换时 _warp_mesh_dirty 置 True) ----
-        phase_params = self._get_phase_params()
-
-        if not hasattr(self, '_obs_layout_initialized'):
-            self._obs_layout_initialized = False
-
-        if self._world_mode == "warehouse":
-            # 仓库: 初始生成后不再变化，phase 切换时重建
-            if not self._obs_layout_initialized or self._warp_mesh_dirty:
-                num_cyl = phase_params["num_obstacles"]
+        # ---- 1. 只初始化一次地图，课程升级不改动正在进行的回合 ----
+        if not getattr(self, "_obs_layout_initialized", False):
+            if self._world_mode == "warehouse":
+                all_ids = torch.arange(self.num_envs, device=self.device)
                 self._world_manager.sample_cylinders(
-                    env_ids, num_cylinders=num_cyl, ensure_per_channel=1)
+                    all_ids, num_cylinders=self.cfg.warehouse_num_cylinders, ensure_per_channel=1)
                 self._world_manager.write_cylinder_poses_to_sim(
                     self.scene, self.num_envs, self.scene.env_origins[:, :2])
-                self._obs_layout_initialized = True
-                if self._warp_mesh_dirty:
-                    print(f"[Warehouse] phase={phase_params['phase']}: resampled "
-                          f"({num_cyl} cylinders × {self.num_envs} envs)")
-                else:
-                    print(f"[Warehouse] initial: "
-                          f"{num_cyl} cylinders × {self.num_envs} envs")
-        elif self._world_mode == "random_obstacles":
-            # 每个并行环境独立采样一次随机混合障碍，并写入 PhysX。
-            if not self._obs_layout_initialized:
+            elif self._world_mode == "random_obstacles":
                 self._world_manager.sample_initial_layout()
-                self._world_manager.write_poses_to_sim(
-                    self.scene,
-                    self.scene.env_origins[:, :2],
-                )
-                self._obs_layout_initialized = True
-                print(
-                    f"[RandomObstacles] initial: "
-                    f"{self.cfg.random_obstacle_world.num_obstacles} "
-                    f"clutter slots + {self.cfg.random_obstacle_world.num_wall_slots} wall slots × "
-                    f"{self.num_envs} envs, edge_spacing>="
-                    f"{self.cfg.random_obstacle_world.min_obstacle_spacing:.2f}m"
-                )
-        elif self._world_mode in ("corridor", "straight_obstacle"):
-            # Static evaluation worlds are fully authored at scene creation.
-            self._obs_layout_initialized = True
-            self._warp_mesh_dirty = False
-        else:
-            # 局部迷宫: phase 切换时重采样随机障碍，否则复用各环境布局
-            if not self._obs_layout_initialized or self._warp_mesh_dirty:
-                self._world_manager.cfg.min_obs_spacing = phase_params["obs_spacing"]
-                self._world_manager.sample_initial_layout(
-                    num_obstacles=phase_params["num_obstacles"])
+                self._world_manager.write_poses_to_sim(self.scene, self.scene.env_origins[:, :2])
+            elif self._world_mode == "ring":
+                self._world_manager.sample_initial_layout(num_obstacles=self.cfg.obs_world.num_obstacles)
                 self._world_manager.write_poses_to_sim(
                     self.scene, self.num_envs, self.scene.env_origins[:, :2])
-                self._obs_layout_initialized = True
-                if self._warp_mesh_dirty:
-                    print(f"[ObsWorld] phase={phase_params['phase']}: resampled "
-                          f"(obs={phase_params['num_obstacles']})")
-                else:
-                    print(f"[ObsWorld] initial: "
-                          f"{phase_params['num_obstacles']} mixed obstacles × "
-                          f"{self.num_envs} envs")
+            self._obs_layout_initialized = True
 
-        # ---- 2. Emma/Goal 位置 ----
+        # Sample start/goal on the existing map; no geometry changes during episodes.
         dr = self.cfg.domain_rand
 
         if self._world_mode == "warehouse":
@@ -2026,7 +1970,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             _wm = self._world_manager
             _cyl_pos = _wm.positions[env_ids] if _wm.positions is not None else None
             _cyl_r = _wm.radii if hasattr(_wm, 'radii') else None
-            _num_cyl = phase_params.get("num_obstacles", 0)
+            _num_cyl = self.cfg.warehouse_num_cylinders
             spawn_result = _wm.sample_spawn_pair(
                 n_pairs=n,
                 emma_hl=self.cfg.robot_half_length,
@@ -2058,7 +2002,10 @@ class EmmaObsNavEnv(DirectRLEnv):
                 goal_local,
                 emma_corner,
                 goal_corner,
-            ) = self._world_manager.sample_spawn_pairs(env_ids)
+            ) = self._world_manager.sample_spawn_pairs(
+                env_ids, **({"task_levels": self._episode_task_level[env_ids]}
+                            if self._world_mode == "random_obstacles" else {})
+            )
             if self.num_envs == 1:
                 if self._world_mode == "random_obstacles":
                     distance = torch.linalg.norm(

@@ -19,7 +19,8 @@ mixed cylinder/cuboid clutter. It does not select a named S/ring/straight scene.
   diagonal certifies continuous paths for the robot's circumscribed footprint.
   Fragmented maps with less than 90% of free grid nodes in one component are
   rejected. Both endpoints belong to that component, respect spawn clearances,
-  and remain more than 5.2 m apart.
+  and provide curriculum banks: 1.5–3 m clear straight routes, 3–5.2 m routes
+  preferring detours, and full routes more than 5.2 m apart.
 
 Configuration lives in `EmmaObsNavEnvCfg.random_obstacle_world`:
 
@@ -30,14 +31,14 @@ Configuration lives in `EmmaObsNavEnvCfg.random_obstacle_world`:
 - `wall_jitter=0.20`: normal wall-position perturbation in metres.
 - `navigation_clearance=0.60`: robot-center clearance, including turning room.
 - `connectivity_grid_resolution=0.15`: conservative reachability grid spacing.
-- `spawn_bank_size=128`: independently sampled start/goal pairs per map.
+- `spawn_bank_size=128`: sampled start/goal pairs per difficulty bank per map.
 - `structured_layout=False`: restores the previous pure scattered-obstacle mode.
 
 As before, map geometry is generated once per environment at initialization.
 Episode resets sample a new bank entry and a fresh heading; they do not rebuild
 PhysX bodies or the global Warp mesh. Torch's training seed also seeds the CPU
 geometry generator. Thus 1024 environments provide 1024 independent maps, with
-128 candidate tasks per map. This is geometric reachability, not a guarantee
+384 candidate tasks per map. This is geometric reachability, not a guarantee
 that the current policy can finish every detour in time.
 
 Run the geometry checks with the project's Isaac Lab Python:
@@ -45,6 +46,7 @@ Run the geometry checks with the project's Isaac Lab Python:
 ```bash
 python tests/test_structured_random_layout.py
 python tests/test_random_obstacle_layout.py
+python tests/test_curriculum_geometry.py
 ```
 
 The structured tests check reproducibility, topology diversity, S-like shortest
@@ -59,3 +61,6 @@ happen before wrapper construction: the wrapper caches a key (otherwise 0)
 and passes it to the first reset. Runner also reseeds from its YAML config
 (otherwise 42), so both sources must be aligned.
 Episode resets still reuse that launch's map and resample start/goal pairs.
+Playback uses the full-distance bank with explicitly configured evaluation noise
+(zero by default). See [the curriculum design](emma_navigation_curriculum.md)
+for training levels, performance thresholds, replay, and checkpoint behavior.

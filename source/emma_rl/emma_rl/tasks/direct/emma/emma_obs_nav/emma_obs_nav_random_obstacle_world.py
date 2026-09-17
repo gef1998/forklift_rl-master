@@ -62,6 +62,8 @@ class RandomObstacleWorldConfig:
     navigation_clearance: float = 0.60
     connectivity_grid_resolution: float = 0.15
     spawn_bank_size: int = 128
+    curriculum_distance_ranges: tuple = ((1.5, 3.0), (3.0, 5.2))
+    spawn_heading_half_angles_deg: tuple = (30.0, 90.0, 180.0)
 
     @property
     def num_wall_slots(self) -> int:
@@ -206,6 +208,11 @@ class RandomObstacleWorldManager:
         self.wall_poses = torch.zeros(num_envs, cfg.num_wall_slots, 3, device=device)
         self.wall_active = torch.zeros(num_envs, cfg.num_wall_slots, dtype=torch.bool, device=device)
         self.spawn_pairs = None
+        self.curriculum_spawn_pairs = None
+        if len(cfg.spawn_heading_half_angles_deg) != 3 or any(
+            not math.isfinite(a) or not 0 <= a <= 180 for a in cfg.spawn_heading_half_angles_deg
+        ):
+            raise ValueError("three spawn heading half-angles in [0, 180] are required")
 
     def sample_initial_layout(self) -> None:
         if self.cfg.structured_layout:
@@ -225,6 +232,8 @@ class RandomObstacleWorldManager:
                 emma_clearance=cfg.emma_spawn_clearance_radius,
                 goal_clearance=cfg.goal_spawn_clearance_radius,
                 min_goal_distance=cfg.goal_min_distance, spawn_bank_size=cfg.spawn_bank_size,
+                include_curriculum_banks=True,
+                curriculum_distance_ranges=cfg.curriculum_distance_ranges,
             ) for seed in seeds]
             for name in ("positions", "active", "wall_poses", "wall_active"):
                 target = getattr(self, name)
@@ -232,6 +241,10 @@ class RandomObstacleWorldManager:
                                              device=self.device, dtype=target.dtype))
             self.spawn_pairs = torch.as_tensor(
                 np.stack([layout["spawn_pairs"] for layout in layouts]),
+                device=self.device, dtype=self.positions.dtype,
+            )
+            self.curriculum_spawn_pairs = torch.as_tensor(
+                np.stack([layout["curriculum_pairs"] for layout in layouts]),
                 device=self.device, dtype=self.positions.dtype,
             )
             self.yaws.uniform_(0, 2 * math.pi)
@@ -297,15 +310,23 @@ class RandomObstacleWorldManager:
             wall.write_root_state_to_sim(state)
 
     def sample_spawn_pairs(
-        self, env_ids: torch.Tensor
+        self, env_ids: torch.Tensor, task_levels: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.cfg.structured_layout:
             if self.spawn_pairs is None:
                 raise RuntimeError("sample_initial_layout must precede spawn sampling")
             choice = torch.randint(self.cfg.spawn_bank_size, (env_ids.numel(),), device=self.device)
-            pairs = self.spawn_pairs[env_ids, choice]
+            if task_levels is None:
+                task_levels = torch.full_like(env_ids, 2)
+            # Levels 2 and 3 share full geometry; level 3 adds stronger noise.
+            geometry_levels = task_levels.clamp(max=2)
+            pairs = self.curriculum_spawn_pairs[env_ids, geometry_levels, choice]
             emma, goal = pairs[:, 0], pairs[:, 1]
-            yaw = torch.rand(env_ids.numel(), device=self.device) * (2 * math.pi)
+            heading_half = torch.tensor(self.cfg.spawn_heading_half_angles_deg,
+                                        device=self.device)[geometry_levels] * (math.pi / 180)
+            direction = torch.atan2(goal[:, 1] - emma[:, 1], goal[:, 0] - emma[:, 0])
+            yaw = direction + (2 * torch.rand(env_ids.numel(), device=self.device) - 1) * heading_half
+            yaw = torch.remainder(yaw, 2 * math.pi)
             emma_region = (emma[:, 0] >= 0).long() + 2 * (emma[:, 1] < 0).long()
             goal_region = (goal[:, 0] >= 0).long() + 2 * (goal[:, 1] < 0).long()
             return emma, yaw, goal, emma_region, goal_region

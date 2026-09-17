@@ -440,10 +440,10 @@ def _worker(args: argparse.Namespace) -> int:
         env_cfg.lidar_latency_range_s = (0.0, 0.0)
         env_cfg.lidar_jitter_max_steps = 0
         env_cfg.lidar_scan_dropout_prob = 0.0
-        env_cfg.training_phase = 1
+        env_cfg.curriculum.enabled = False
         if scenario == "ring":
             env_cfg.obs_world.corridor_width = width
-            env_cfg.phase1_num_obstacles = 0
+            env_cfg.obs_world.num_obstacles = 0
         elif scenario == "corridor":
             env_cfg.corridor_world.gate_width = width
             env_cfg.corridor_world.mirror_across_envs = False

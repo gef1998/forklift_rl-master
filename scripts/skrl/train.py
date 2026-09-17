@@ -68,6 +68,7 @@ import random
 from datetime import datetime
 
 import skrl
+from skrl.utils import set_seed
 from packaging import version
 
 # check for minimum supported skrl version
@@ -144,6 +145,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomization occur in the environment initialization so we set the seed here
     agent_cfg["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["seed"]
     env_cfg.seed = agent_cfg["seed"]
+    set_seed(agent_cfg["seed"])  # Seed the wrapper before it caches its first-reset key.
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "skrl", agent_cfg["agent"]["experiment"]["directory"])
@@ -198,6 +200,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     del agent_cfg["models"]["custom"]
 
     runner = Runner(env, agent_cfg)
+    if hasattr(env.unwrapped, "_curriculum"):
+        runner.agent.checkpoint_modules["curriculum"] = env.unwrapped._curriculum
 
     # load checkpoint (if specified)
     if resume_path:
