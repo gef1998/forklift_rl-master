@@ -352,6 +352,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._prev_goal_dist = torch.zeros((self.num_envs,), device=self.device)
         self._init_goal_dist = torch.ones((self.num_envs,), device=self.device)  # 初始距离, 用于归一化
         # ---- 策略原始动作与上一控制步动作 ----
+        # _prev_policy_actions 同时供奖励 (动作变化正则) 和观测 [134:136] 使用。
+        # DirectRLEnv.step 的顺序是 _get_rewards → _reset_idx → _get_observations,
+        # 所以观测读到的正好是"本步策略输出"(刚重置的环境为 0)。
         self._policy_actions = torch.zeros_like(self.actions)
         self._prev_policy_actions = torch.zeros_like(self.actions)
         self._last_forward_speed = torch.zeros(self.num_envs, device=self.device)
@@ -1123,7 +1126,8 @@ class EmmaObsNavEnv(DirectRLEnv):
 
 
     # ==================================================================
-    # Observation — 130 dims (120 LiDAR + 2 goal_dir + 1 goal_dist + 3 IMU + 4 time)
+    # Observation — 136 dims (120 LiDAR + 2 goal_dir + 1 goal_dist + 3 IMU + 8 time
+    #                        + 2 prev_action)
     # ==================================================================
     # Layout:
     #   [  0:120] lidar_norm      120    LiDAR clearance 取反 (3° sector, 360° FOV)
@@ -1132,6 +1136,13 @@ class EmmaObsNavEnv(DirectRLEnv):
     #   [123:125] vel_b              2    ICR速度 (body frame) / max_linear_velocity
     #   [125:126] ang_vel_z_norm     1    Z轴角速度 / max_angular_velocity
     #   [126:134] time_enc           8    实际 AoI 秒数的连续正弦编码
+    #   [134:136] prev_action        2    策略上一步发出的 signed action (∈[-1,1]²)
+    #
+    # prev_action 暴露的是策略**自己**上一步的输出，用来打断"瞬时角速度 +
+    # 无动作记忆"这条单步延迟反馈通路: 循环策略此前只能靠 GRU 隐状态记住自己
+    # 发出的交替指令，而隐状态会把交替模式保持并放大。
+    # 取的是 _prev_policy_actions，即 delay/noise **之前**的原始策略输出,
+    # 因此这一路是确定性的 ("我要了什么", 而非"车轮实际执行了什么")。
     # ==================================================================
     def _control_time(self) -> torch.Tensor:
         """Return current control time as a per-environment tensor."""
@@ -1617,7 +1628,7 @@ class EmmaObsNavEnv(DirectRLEnv):
                 self.num_envs, cfg.time_encoding_dim, device=self.device)
 
         # ================================================================
-        # 组装观测: 120 + 2 + 1 + 2 + 1 + 8 = 134
+        # 组装观测: 120 + 2 + 1 + 2 + 1 + 8 + 2 = 136
         # ================================================================
         obs = torch.cat([
             lidar_norm,                #   0:120  (120)
@@ -1626,6 +1637,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             vel_b,                     # 123:125  (2)
             ang_vel_z_norm,            # 125:126  (1)
             time_enc,                  # 126:134  (8)
+            self._prev_policy_actions,  # 134:136  (2)
         ], dim=-1)
         assert obs.shape[-1] == cfg.single_obs_dim, \
             f"obs dim mismatch: {obs.shape[-1]} != {cfg.single_obs_dim}"

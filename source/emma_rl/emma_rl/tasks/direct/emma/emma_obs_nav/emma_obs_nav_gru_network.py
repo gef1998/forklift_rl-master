@@ -23,7 +23,9 @@ class EmmaNavGRU(EmmaNavShared):
         self.num_envs = int(recurrent["num_envs"])
         if min(self.hidden_size, self.num_layers, self.num_envs) < 1 or self.sequence_length < 2:
             raise ValueError("GRU sizes must be positive and sequence_length must be >= 2")
-        # Keep the same 134-D observation encoder and signed Beta action model.
+        # Keep the same observation encoder and signed Beta action model as the MLP.
+        # The encoder input width comes from observation_space, so it tracks
+        # single_obs_dim in the env config.
         self.gru = nn.GRU(64, self.hidden_size, self.num_layers, batch_first=True)
         for name, param in self.gru.named_parameters():
             if "weight" in name:

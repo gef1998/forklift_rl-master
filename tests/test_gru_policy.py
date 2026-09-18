@@ -23,11 +23,16 @@ spec = importlib.util.spec_from_file_location("emma_recurrent_runner", EMMA / "u
 integration = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(integration)
 
+# Mirrors single_obs_dim in emma_obs_nav_env_cfg.py: 120 LiDAR + 2 goal_dir +
+# 1 goal_dist + 2 vel + 1 ang_vel + 8 time + 2 previous actions. Kept local
+# because this suite is pure Torch and must not import Isaac Lab.
+OBS_DIM = 136
+
 
 def model(num_envs=3, length=8):
     torch.manual_seed(18)
     m = network.EmmaNavGRU(
-        Box(-10, 10, (134,)), None, Box(-1, 1, (2,)),
+        Box(-10, 10, (OBS_DIM,)), None, Box(-1, 1, (2,)),
         {"policy": {"min_concentration": 1., "initial_concentration": 2., "action_eps": 1e-6},
          "value": {"clip_actions": False},
          "recurrent": {"hidden_size": 16, "num_layers": 1, "sequence_length": length, "num_envs": num_envs}},
@@ -55,8 +60,8 @@ def agent(num_envs=3, length=4):
 class GRUPolicyTests(unittest.TestCase):
     def test_history_changes_policy_and_value_for_same_current_observation(self):
         m = model()
-        obs = torch.randn(3, 134)
-        _, history = m.compute({"observations": torch.randn(3, 134)}, "policy")
+        obs = torch.randn(3, OBS_DIM)
+        _, history = m.compute({"observations": torch.randn(3, OBS_DIM)}, "policy")
         _, empty = m.act({"observations": obs}, "policy")
         _, remembered = m.act({"observations": obs, "rnn": history['rnn']}, "policy")
         self.assertFalse(torch.allclose(empty['mean_actions'], remembered['mean_actions'], atol=1e-8))
@@ -68,7 +73,7 @@ class GRUPolicyTests(unittest.TestCase):
     def test_sequence_training_matches_step_inference_with_mixed_episode_ends(self):
         m = model()
         batch, length = 3, 8
-        obs = torch.randn(batch, length, 134)
+        obs = torch.randn(batch, length, OBS_DIM)
         term = torch.zeros(batch, length, 1, dtype=torch.bool)
         trunc = torch.zeros_like(term)
         term[0, 2] = True
@@ -84,7 +89,7 @@ class GRUPolicyTests(unittest.TestCase):
             alphas.append(alpha)
             values.append(value)
             hidden = output['rnn'][0] * (~(term[:, t] | trunc[:, t])).float()[None]
-        sequence_inputs = {"observations": obs.reshape(-1, 134),
+        sequence_inputs = {"observations": obs.reshape(-1, OBS_DIM),
                            "rnn": [torch.stack(states, dim=2).reshape(1, -1, 16)],
                            "terminated": term.reshape(-1, 1), "truncated": trunc.reshape(-1, 1)}
         alpha, output = m.compute(sequence_inputs, "policy")
@@ -95,7 +100,7 @@ class GRUPolicyTests(unittest.TestCase):
 
     def test_gradient_reaches_history_but_stops_at_episode_boundary(self):
         m = model(num_envs=1)
-        obs = torch.randn(8, 134, requires_grad=True)
+        obs = torch.randn(8, OBS_DIM, requires_grad=True)
         term = torch.zeros(8, 1, dtype=torch.bool)
         term[2] = True
         values, _ = m.compute({"observations": obs, "rnn": [torch.zeros(1, 8, 16)],
@@ -107,7 +112,7 @@ class GRUPolicyTests(unittest.TestCase):
 
     def test_value_bootstrap_does_not_reuse_policy_features(self):
         m = model()
-        first, second = torch.randn(3, 134), torch.randn(3, 134)
+        first, second = torch.randn(3, OBS_DIM), torch.randn(3, OBS_DIM)
         expected, _ = m.compute({"observations": second}, "value")
         m.act({"observations": first}, "policy")
         actual, _ = m.compute({"observations": second}, "value")
@@ -115,7 +120,7 @@ class GRUPolicyTests(unittest.TestCase):
 
     def test_log_prob_replay_and_action_bounds(self):
         m = model()
-        inputs = {"observations": torch.randn(3, 134), "rnn": [torch.randn(1, 3, 16)]}
+        inputs = {"observations": torch.randn(3, OBS_DIM), "rnn": [torch.randn(1, 3, 16)]}
         actions, outputs = m.act(inputs, "policy")
         _, replay = m.act({**inputs, "taken_actions": actions}, "policy")
         torch.testing.assert_close(outputs['log_prob'], replay['log_prob'])
@@ -135,7 +140,7 @@ class GRUPolicyTests(unittest.TestCase):
     def test_playback_commits_memory_and_resets_only_finished_environments(self):
         a = agent()
         a.enable_training_mode(False, apply_to_models=True)
-        obs = torch.randn(3, 134)
+        obs = torch.randn(3, OBS_DIM)
         term = torch.tensor([[True], [False], [False]])
         trunc = torch.tensor([[False], [True], [False]])
         next_hidden = self.transition(a, obs, term, trunc, 0)
@@ -149,7 +154,7 @@ class GRUPolicyTests(unittest.TestCase):
         a = agent()
         a.enable_training_mode(True)
         before = a.policy.gru.weight_hh_l0.detach().clone()
-        obs = torch.randn(3, 134)
+        obs = torch.randn(3, OBS_DIM)
         zeros = torch.zeros(3, 1, dtype=torch.bool)
         for step in range(16):
             term, trunc = zeros.clone(), zeros.clone()
@@ -178,7 +183,7 @@ class GRUPolicyTests(unittest.TestCase):
     def test_invalid_sequence_rejected(self):
         m = model()
         with self.assertRaises(ValueError):
-            m.compute({'observations': torch.zeros(7, 134), 'rnn': [torch.zeros(1, 7, 16)],
+            m.compute({'observations': torch.zeros(7, OBS_DIM), 'rnn': [torch.zeros(1, 7, 16)],
                        'terminated': torch.zeros(7, 1, dtype=torch.bool)}, 'policy')
 
     def test_minibatches_preserve_environment_and_time_order(self):
@@ -216,7 +221,7 @@ class GRUPolicyTests(unittest.TestCase):
 
     def test_mlp_control_uses_same_timeout_boundary_and_still_updates(self):
         m = network.EmmaNavShared(
-            Box(-10, 10, (134,)), None, Box(-1, 1, (2,)),
+            Box(-10, 10, (OBS_DIM,)), None, Box(-1, 1, (2,)),
             {'policy': {'min_concentration': 1., 'initial_concentration': 2., 'action_eps': 1e-6},
              'value': {'clip_actions': False}}, 'cpu')
         m.init_state_dict(role='policy')
@@ -231,7 +236,7 @@ class GRUPolicyTests(unittest.TestCase):
         a.init()
         a.enable_training_mode(True)
         before = m.net[0].weight.detach().clone()
-        obs = torch.randn(3, 134)
+        obs = torch.randn(3, OBS_DIM)
         for step in range(8):
             with torch.no_grad():
                 actions, _ = a.act(obs, None, timestep=step, timesteps=8)

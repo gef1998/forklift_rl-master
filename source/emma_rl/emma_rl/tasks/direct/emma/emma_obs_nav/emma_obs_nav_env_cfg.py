@@ -109,11 +109,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     action_control_mode: str = "body_twist" # "body_twist" or "wheel_velocity"
     state_space = 0
 
-    # ---- Observation: 120 LiDAR + 2 goal_dir + 1 goal_dist + 3 IMU + 8 time = 134 ----
+    # ---- Observation: 120 LiDAR + 2 goal_dir + 1 goal_dist + 3 IMU + 8 time + 2 prev_action = 136 ----
     time_encoding_dim: int = 8       # richer AoI encoding for async LiDAR
-    single_obs_dim: int = 134        # 120 + 2 + 1 + 2 + 1 + 8 = 134
+    single_obs_dim: int = 136        # 120 + 2 + 1 + 2 + 1 + 8 + 2 = 136
     frame_stack: int = 1
-    observation_space = single_obs_dim * frame_stack  # 134
+    observation_space = single_obs_dim * frame_stack  # 136
     # "initial" 保留原任务的初始距离动态归一化；"lidar_max" 使用固定
     # LiDAR 量程归一化，适合 MPPI 专家监督，避免相同观测比例对应不同米制距离。
     goal_distance_normalization: str = "lidar_max"
@@ -200,7 +200,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     angular_acceleration_command_scale: float = 0.94
 
     sync_body_velocity_limits_to_wheels: bool = False
-    max_linear_velocity: float = 0.5
+    max_linear_velocity: float = 0.66
     max_angular_velocity: float = 1.5
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
@@ -459,4 +459,4 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
 
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.
-    nav_action_change_scale: float = 0.002
+    nav_action_change_scale: float = 0.05

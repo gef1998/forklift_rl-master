@@ -288,10 +288,12 @@ class PolicyTraceRecorder:
             return
         observations = np.stack(self.observations).astype(np.float32, copy=False)
         actions = np.stack(self.actions).astype(np.float32, copy=False)
-        if observations.ndim != 2 or observations.shape[1] not in (130, 134):
+        # Legacy 130/134 layouts are kept so a trace recorded by an older checkout
+        # still validates; the current env emits 136 (134 + 2 previous actions).
+        if observations.ndim != 2 or observations.shape[1] not in (130, 134, 136):
             raise ValueError(
-                "Expected traced observations with shape (N, 130) or "
-                f"(N, 134), got {observations.shape}"
+                "Expected traced observations with shape (N, 130), (N, 134) or "
+                f"(N, 136), got {observations.shape}"
             )
         if actions.shape[1:] != (2,):
             raise ValueError(f"Expected traced actions with shape (N, 2), got {actions.shape}")
