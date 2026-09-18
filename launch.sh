@@ -20,6 +20,7 @@ Commands:
   play          Play a checkpoint on TASK
   evaluate      Run the legacy continuous play/evaluate loop
   test          Scan three documented test scenarios and save metrics
+  export        Export a checkpoint to a deployable ONNX policy (--checkpoint, TASK)
   random-agent  Run TASK with random actions
   zero-agent    Run TASK with zero actions
   wheel-response  Run one-environment constant wheel velocity diagnostics
@@ -80,6 +81,13 @@ case "${command}" in
     test)
         require_python
         "${ISAAC_PYTHON}" "${ROOT_DIR}/scripts/skrl/test.py" --task "${TASK}" --algorithm PPO "$@"
+        ;;
+    export)
+        # TASK selects the network, so a GRU run needs
+        # TASK=Emma-RL-ObsNav-GRU-Direct-v0. A checkpoint trained under the other
+        # task is reported rather than exported with the wrong network.
+        require_python
+        "${ISAAC_PYTHON}" "${ROOT_DIR}/scripts/skrl/export.py" --task "${TASK}" "$@"
         ;;
     random-agent)
         require_python
