@@ -31,7 +31,7 @@ memory:
 
 agent:
   class: PPO
-  rollouts: 1024
+  rollouts: 512
   learning_epochs: 4
   mini_batches: 128
   # At 50 Hz, gamma=0.99 has only about a 2 s horizon. Long detours need
@@ -67,5 +67,5 @@ agent:
 
 trainer:
   class: SequentialTrainer
-  timesteps: 500000
+  timesteps: 200000
   environment_info: log

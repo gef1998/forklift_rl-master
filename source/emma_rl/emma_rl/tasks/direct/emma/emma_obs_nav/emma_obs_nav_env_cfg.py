@@ -453,9 +453,9 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.35
+    nav_clearance_threshold: float = 0.2
     nav_proximity_cost_per_second: float = 0.25
-    nav_time_cost_per_second: float = 0.10
+    nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.

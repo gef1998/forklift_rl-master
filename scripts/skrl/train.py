@@ -113,6 +113,8 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 
 import emma_rl.tasks  # noqa: F401
 from emma_rl.tasks.direct.emma.utils import generate_custom_model
+if args_cli.ml_framework.startswith("torch"):
+    from emma_rl.tasks.direct.emma.utils.recurrent_runner import EmmaRunner as Runner
 
 # config shortcuts
 algorithm = args_cli.algorithm.lower()
@@ -122,6 +124,8 @@ agent_cfg_entry_point = "skrl_cfg_entry_point" if algorithm in ["ppo"] else f"sk
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with skrl agent."""
+    if agent_cfg["models"].get("name") == "EmmaNavGRU" and not args_cli.ml_framework.startswith("torch"):
+        raise ValueError("The Emma PPO+GRU baseline requires --ml_framework torch")
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device

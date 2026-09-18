@@ -386,6 +386,9 @@ def _worker(args: argparse.Namespace) -> int:
         import isaaclab_tasks  # noqa: F401
         import emma_rl.tasks  # noqa: F401
         from emma_rl.tasks.direct.emma.utils import generate_custom_model
+        from emma_rl.tasks.direct.emma.utils.recurrent_runner import (
+            EmmaRunner as Runner, prepare_recurrent_evaluation,
+        )
 
         algorithm = args.algorithm.lower()
         try:
@@ -415,6 +418,7 @@ def _worker(args: argparse.Namespace) -> int:
             )
         if not os.path.isfile(checkpoint):
             raise FileNotFoundError(f"checkpoint does not exist: {checkpoint}")
+        prepare_recurrent_evaluation(experiment_cfg, checkpoint)
 
         env_cfg = parse_env_cfg(
             args.task,
@@ -476,6 +480,7 @@ def _worker(args: argparse.Namespace) -> int:
             Runner._generate_models = generate_custom_model
         del experiment_cfg["models"]["custom"]
         runner = Runner(env, experiment_cfg)
+        runner.agent.checkpoint_modules["curriculum"] = base_env._curriculum
         runner.agent.load(checkpoint)
         runner.agent.enable_training_mode(False, apply_to_models=True)
 
@@ -509,7 +514,15 @@ def _worker(args: argparse.Namespace) -> int:
                         obs, None, timestep=timestep, timesteps=timestep
                     )
                     actions = outputs[-1].get("mean_actions", outputs[0])
-                    obs, _, terminated, truncated, info = env.step(actions)
+                    next_obs, rewards, terminated, truncated, info = env.step(actions)
+                    if getattr(runner.agent, "_rnn", False):
+                        runner.agent.record_transition(
+                            observations=obs, states=None, actions=actions, rewards=rewards,
+                            next_observations=next_obs, next_states=None,
+                            terminated=terminated, truncated=truncated, infos=info,
+                            timestep=timestep, timesteps=timestep,
+                        )
+                    obs = next_obs
                 evaluation = info.get("evaluation") if isinstance(info, dict) else None
                 if not isinstance(evaluation, dict):
                     raise RuntimeError(

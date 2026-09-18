@@ -192,6 +192,10 @@ from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry, pa
 
 import emma_rl.tasks  # noqa: F401
 from emma_rl.tasks.direct.emma.utils import generate_custom_model
+if args_cli.ml_framework.startswith("torch"):
+    from emma_rl.tasks.direct.emma.utils.recurrent_runner import (
+        EmmaRunner as Runner, prepare_recurrent_evaluation,
+    )
 
 # config shortcuts
 algorithm = args_cli.algorithm.lower()
@@ -672,6 +676,10 @@ def main():
                 other_dirs=["checkpoints"],
             )
         log_dir = os.path.dirname(os.path.dirname(resume_path))
+        if experiment_cfg["models"].get("name") == "EmmaNavGRU":
+            if not args_cli.ml_framework.startswith("torch"):
+                raise ValueError("The Emma PPO+GRU baseline requires --ml_framework torch")
+            prepare_recurrent_evaluation(experiment_cfg, resume_path)
 
     # create isaac environment
     print("[INFO] Creating Isaac environment...", flush=True)
@@ -839,7 +847,16 @@ def main():
                     else:
                         actions = outputs[-1].get("mean_actions", outputs[0])
                 # env stepping
-                next_obs, _, terminated, truncated, _ = env.step(actions)
+                next_obs, rewards, terminated, truncated, infos = env.step(actions)
+                if not fixed_wheel_mode and getattr(runner.agent, "_rnn", False):
+                    # act() only computes the next hidden state in skrl. This
+                    # call commits it and clears just the auto-reset episodes.
+                    runner.agent.record_transition(
+                        observations=obs, states=None, actions=actions, rewards=rewards,
+                        next_observations=next_obs, next_states=None,
+                        terminated=terminated, truncated=truncated, infos=infos,
+                        timestep=timestep, timesteps=timestep,
+                    )
 
                 if action_plot_recorder is not None and not action_plot_recorder.complete:
                     action_plot_recorder.append(

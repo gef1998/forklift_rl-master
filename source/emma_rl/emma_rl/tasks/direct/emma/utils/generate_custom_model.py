@@ -10,6 +10,7 @@ from skrl.models.torch import Model
 
 from ..emma_costmap_nav.emma_costmap_nav_network import EmmaCostmapShared
 from ..emma_obs_nav.emma_obs_nav_network import EmmaNavShared
+from ..emma_obs_nav.emma_obs_nav_gru_network import EmmaNavGRU
 
 
 def generate_custom_model(
@@ -17,7 +18,7 @@ def generate_custom_model(
     env: Wrapper | MultiAgentEnvWrapper,
     cfg: dict[str, Any],
 ) -> dict[str, dict[str, Model]]:
-    """Generate one of the two supported Emma shared PPO models."""
+    """Generate a maintained Emma shared PPO model."""
 
     multi_agent = isinstance(env, MultiAgentEnvWrapper)
     device = env.device
@@ -29,6 +30,7 @@ def generate_custom_model(
     del cfg["models"]["separate"]
     model_classes = {
         "EmmaNavShared": EmmaNavShared,
+        "EmmaNavGRU": EmmaNavGRU,
         "EmmaCostmapShared": EmmaCostmapShared,
     }
     model_name = cfg["models"].pop("name")
@@ -43,7 +45,14 @@ def generate_custom_model(
         if not model_cfg:
             raise ValueError("The 'models' field is not defined in the specified configuration")
 
+        recurrent = model_cfg.pop("recurrent", None)
         parameters = {}
+        if model_name == "EmmaNavGRU":
+            if multi_agent:
+                raise ValueError("The Emma GRU baseline supports single-agent environments")
+            if recurrent is None:
+                raise ValueError("EmmaNavGRU requires models.recurrent configuration")
+            parameters["recurrent"] = {**recurrent, "num_envs": env.num_envs}
         for role, role_cfg in model_cfg.items():
             if not role_cfg.get("class"):
                 raise ValueError(f"The 'models.{role}.class' field is not defined")
