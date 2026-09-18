@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 from pathlib import Path
 
 import torch
@@ -194,6 +195,106 @@ def test_acceleration_interpolation_stays_in_speed_feasible_set():
     torch.testing.assert_close(scale, torch.ones_like(scale))
 
 
+# Real Emma ObsNav geometry and limits (`emma_obs_nav_env_cfg.py`), quoted with the
+# command scale factors, so the bounds below are stated in the units of the
+# deployed base: 0.05 m wheels, 0.43 m track width, 0.5 m/s and 1.5 rad/s body
+# limits, and a 2.0 rad/s^2 angular limit scaled by 0.94 to the 1.884 rad/s^2 the
+# base was calibrated to track.
+NAV_WHEEL_MAX = 20.0
+NAV_WHEEL_RADIUS = 0.05
+NAV_WHEEL_BASE = 0.43
+NAV_LINEAR_MAX = 0.5
+NAV_ANGULAR_MAX = 1.5
+NAV_STEP_DT = 0.02
+NAV_LINEAR_ACCEL_LIMIT = 1.0 * 0.90
+NAV_ANGULAR_ACCEL_LIMIT = 2.0 * 0.94
+
+
+def _nav_desired_wheels(actions: torch.Tensor) -> torch.Tensor:
+    return action_control.actions_to_raw_wheel_velocities(
+        actions,
+        "body_twist",
+        NAV_WHEEL_MAX,
+        NAV_WHEEL_RADIUS,
+        NAV_WHEEL_BASE,
+        NAV_LINEAR_MAX,
+        NAV_ANGULAR_MAX,
+    )
+
+
+def _nav_yaw_of(wheels: torch.Tensor) -> torch.Tensor:
+    return action_control.wheel_velocities_to_body_twist(
+        wheels, NAV_WHEEL_RADIUS, NAV_WHEEL_BASE
+    )[..., 1]
+
+
+def _run_rate_limit(desired: torch.Tensor, start: torch.Tensor) -> torch.Tensor:
+    previous = start
+    bounded_steps = []
+    for step in range(desired.shape[0]):
+        bounded, _ = action_control.limit_wheel_velocity_acceleration(
+            desired[step : step + 1],
+            previous,
+            NAV_STEP_DT,
+            NAV_WHEEL_RADIUS,
+            NAV_WHEEL_BASE,
+            NAV_LINEAR_ACCEL_LIMIT,
+            NAV_ANGULAR_ACCEL_LIMIT,
+        )
+        bounded_steps.append(bounded)
+        previous = bounded
+    return torch.cat(bounded_steps)
+
+
+def test_nyquist_yaw_dither_is_bounded_by_the_calibrated_acceleration():
+    """A yaw command that flips sign every step must become an achievable demand.
+
+    ``play_diagnostics`` traces of a dithering checkpoint show the angular action
+    changing sign every ~1.9 steps, a ~27 rad/s^2 yaw demand where the real base
+    tracks 1.884 rad/s^2. The unlimited simulator accepts that demand, which is
+    why the behaviour is invisible in sim and becomes sway on hardware.
+    """
+    steps = 24
+    steering, dither = 0.15, 0.18
+    actions = torch.tensor(
+        [[0.8, steering + (dither if step % 2 == 0 else -dither)] for step in range(steps)]
+    )
+    desired = _nav_desired_wheels(actions)
+    yaw_desired = _nav_yaw_of(desired)
+    # Demand as seen from rest, so the first step counts.
+    unlimited_peak = yaw_desired.diff().abs().max().item()
+
+    yaw_limited = _nav_yaw_of(_run_rate_limit(desired, torch.zeros(1, 2)))
+    limited_peak = torch.cat((torch.zeros(1), yaw_limited)).diff().abs().max().item()
+
+    bound = NAV_ANGULAR_ACCEL_LIMIT * NAV_STEP_DT
+    assert limited_peak <= bound + 1e-6, (limited_peak, bound)
+    # Without the bound, the simulator accepts an order of magnitude more than
+    # the base can produce.
+    assert unlimited_peak > 10.0 * bound, (unlimited_peak, bound)
+
+
+def test_rate_limit_is_transparent_for_a_slow_steering_command():
+    """The bound must not fight legitimate manoeuvres.
+
+    The measured dither is a control-rate artefact, not the steering signal, so
+    the limit has to pass the frequencies the task actually uses. Starting from
+    the commanded steady state isolates steering from the initial acceleration
+    out of rest, which is correctly limited.
+    """
+    steps = 60
+    sweep_hz = 0.2
+    actions = torch.tensor(
+        [
+            [0.8, 0.6 * math.sin(2.0 * math.pi * sweep_hz * step * NAV_STEP_DT)]
+            for step in range(steps)
+        ]
+    )
+    desired = _nav_desired_wheels(actions)
+    bounded = _run_rate_limit(desired[1:], desired[0:1])
+    torch.testing.assert_close(bounded, desired[1:], atol=1e-5, rtol=0)
+
+
 def test_invalid_acceleration_configuration_is_rejected():
     for dt, linear, angular in [(0, 1, 2), (.02, -1, 2), (.02, 1, float('nan'))]:
         try:
@@ -226,6 +327,8 @@ if __name__ == "__main__":
         test_invalid_action_control_mode_is_rejected,
         test_acceleration_limits_cover_reversal_and_scaled_radii,
         test_acceleration_interpolation_stays_in_speed_feasible_set,
+        test_nyquist_yaw_dither_is_bounded_by_the_calibrated_acceleration,
+        test_rate_limit_is_transparent_for_a_slow_steering_command,
         test_invalid_acceleration_configuration_is_rejected,
     ]
     for test in tests:

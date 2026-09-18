@@ -125,6 +125,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--_worker-scenario", choices=SCENARIOS, help=argparse.SUPPRESS)
     parser.add_argument("--_worker-width", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--_worker-output", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-motion-acceleration-limits",
+        "--no_motion_acceleration_limits",
+        dest="no_motion_acceleration_limits",
+        action="store_true",
+        help=(
+            "Disable the body-twist command rate limit that the env config enables "
+            "by default, to score a checkpoint against the unlimited actuator it "
+            "was trained on. Forwarded to every scenario worker."
+        ),
+    )
     AppLauncher.add_app_launcher_args(parser)
     return parser
 
@@ -445,6 +456,16 @@ def _worker(args: argparse.Namespace) -> int:
         env_cfg.lidar_jitter_max_steps = 0
         env_cfg.lidar_scan_dropout_prob = 0.0
         env_cfg.curriculum.enabled = False
+        # The rate limit decides whether the evaluated angular command is one the
+        # real base could execute, so the scan must say which actuator it scored.
+        if args.no_motion_acceleration_limits:
+            env_cfg.enable_motion_acceleration_limits = False
+        print(
+            f"[TEST RATE LIMIT] "
+            f"{'enabled' if env_cfg.enable_motion_acceleration_limits else 'disabled'} "
+            f"for {scenario} width={width:.3f}m",
+            flush=True,
+        )
         if scenario == "ring":
             env_cfg.obs_world.corridor_width = width
             env_cfg.obs_world.num_obstacles = 0

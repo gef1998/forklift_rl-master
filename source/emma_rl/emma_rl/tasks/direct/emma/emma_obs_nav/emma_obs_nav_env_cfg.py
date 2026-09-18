@@ -191,7 +191,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Nominal command slew limits; safety braking retains priority.
     # Substeps interpolate commands. These are not hard bounds on measured
     # acceleration during collision impulses or initial settling.
-    enable_motion_acceleration_limits: bool = False
+    enable_motion_acceleration_limits: bool = True
     max_linear_acceleration: float = 1.0   # m/s^2
     max_angular_acceleration: float = 2.0  # rad/s^2
     # Command headroom for measured tracking overshoot (settled start/reversal).

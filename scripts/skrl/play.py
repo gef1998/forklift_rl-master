@@ -140,6 +140,17 @@ parser.add_argument(
         "partial-FOV filling at representative body-frame angles."
     ),
 )
+parser.add_argument(
+    "--no-motion-acceleration-limits",
+    "--no_motion_acceleration_limits",
+    dest="no_motion_acceleration_limits",
+    action="store_true",
+    help=(
+        "Disable the body-twist command rate limit that the env config enables by "
+        "default. Use this to reproduce checkpoints trained before the limit "
+        "existed, or to A/B the limit on the same --seed."
+    ),
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -325,6 +336,7 @@ class EpisodeActionPlotRecorder:
         "actual_vx_mps",
         "actual_wz_radps",
         "wheel_projection_scale",
+        "wheel_acceleration_scale",
         "wheel_left_cmd_radps",
         "wheel_right_cmd_radps",
         "wheel_left_actual_radps",
@@ -332,6 +344,9 @@ class EpisodeActionPlotRecorder:
         "terminated",
         "truncated",
     )
+    # Derived from CSV_COLUMNS so the plot cannot drift out of step with the
+    # written schema when a column is added.
+    CSV_INDEX = {name: index for index, name in enumerate(CSV_COLUMNS)}
 
     def __init__(self, output_dir: str, step_dt: float, max_episodes: int):
         if step_dt <= 0:
@@ -401,6 +416,7 @@ class EpisodeActionPlotRecorder:
             device="cpu", dtype=torch.float32
         )
         projection_scale = float(base_env._wheel_projection_scale[0].item())
+        acceleration_scale = float(base_env._wheel_acceleration_scale[0].item())
         body_speed = float(base_env._last_forward_speed[0].item())
         body_angular_speed = float(base_env._last_angular_speed[0].item())
         step = len(self.records)
@@ -422,6 +438,7 @@ class EpisodeActionPlotRecorder:
             body_speed,
             body_angular_speed,
             projection_scale,
+            acceleration_scale,
             float(wheel_command[0]),
             float(wheel_command[1]),
             float(wheel_actual[0]),
@@ -442,12 +459,15 @@ class EpisodeActionPlotRecorder:
         if not self.records:
             return
         data = np.asarray(self.records, dtype=np.float64)
+        col = self.CSV_INDEX
         # Isaac Lab 可能在 env.step 返回前已经重置终止环境，因此终止行仍保留
         # 在 CSV 中供识别，但不画入响应曲线，避免把重置后的零命令误判成制动响应。
-        valid_plot_rows = (data[:, 20] < 0.5) & (data[:, 21] < 0.5)
+        valid_plot_rows = (data[:, col["terminated"]] < 0.5) & (
+            data[:, col["truncated"]] < 0.5
+        )
         plot_data = data[valid_plot_rows] if valid_plot_rows.any() else data
-        command_time = plot_data[:, 1]
-        measurement_time = plot_data[:, 2]
+        command_time = plot_data[:, col["command_time_s"]]
+        measurement_time = plot_data[:, col["measurement_time_s"]]
 
         import matplotlib
         matplotlib.use("Agg")
@@ -456,27 +476,27 @@ class EpisodeActionPlotRecorder:
         fig, axes = plt.subplots(4, 1, figsize=(14, 13), sharex=True)
         axes[0].plot(
             command_time,
-            plot_data[:, 3],
+            plot_data[:, col["policy_action_linear"]],
             label="policy action linear",
             alpha=0.65,
             linestyle="--",
         )
         axes[0].plot(
             command_time,
-            plot_data[:, 4],
+            plot_data[:, col["policy_action_angular"]],
             label="policy action angular",
             alpha=0.65,
             linestyle="--",
         )
         axes[0].plot(
             command_time,
-            plot_data[:, 5],
+            plot_data[:, col["applied_action_linear"]],
             label="applied action linear",
             alpha=0.9,
         )
         axes[0].plot(
             command_time,
-            plot_data[:, 6],
+            plot_data[:, col["applied_action_angular"]],
             label="applied action angular",
             alpha=0.9,
         )
@@ -486,17 +506,26 @@ class EpisodeActionPlotRecorder:
         axes[0].grid(True)
 
         axes[1].plot(
-            command_time, plot_data[:, 7], label="requested vx", alpha=0.7
+            command_time,
+            plot_data[:, col["requested_vx_mps"]],
+            label="requested vx",
+            alpha=0.7,
         )
         axes[1].plot(
-            command_time, plot_data[:, 9], label="projected vx", alpha=0.8
+            command_time,
+            plot_data[:, col["projected_vx_mps"]],
+            label="projected vx",
+            alpha=0.8,
         )
         axes[1].plot(
-            command_time, plot_data[:, 11], label="safe vx", alpha=0.9
+            command_time,
+            plot_data[:, col["safe_vx_mps"]],
+            label="safe vx",
+            alpha=0.9,
         )
         axes[1].plot(
             measurement_time,
-            plot_data[:, 13],
+            plot_data[:, col["actual_vx_mps"]],
             label="actual vx",
             linewidth=1.1,
         )
@@ -505,17 +534,26 @@ class EpisodeActionPlotRecorder:
         axes[1].grid(True)
 
         axes[2].plot(
-            command_time, plot_data[:, 8], label="requested wz", alpha=0.7
+            command_time,
+            plot_data[:, col["requested_wz_radps"]],
+            label="requested wz",
+            alpha=0.7,
         )
         axes[2].plot(
-            command_time, plot_data[:, 10], label="projected wz", alpha=0.8
+            command_time,
+            plot_data[:, col["projected_wz_radps"]],
+            label="projected wz",
+            alpha=0.8,
         )
         axes[2].plot(
-            command_time, plot_data[:, 12], label="safe wz", alpha=0.9
+            command_time,
+            plot_data[:, col["safe_wz_radps"]],
+            label="safe wz",
+            alpha=0.9,
         )
         axes[2].plot(
             measurement_time,
-            plot_data[:, 14],
+            plot_data[:, col["actual_wz_radps"]],
             label="actual wz",
             linewidth=1.1,
         )
@@ -525,25 +563,25 @@ class EpisodeActionPlotRecorder:
 
         axes[3].plot(
             command_time,
-            plot_data[:, 16],
+            plot_data[:, col["wheel_left_cmd_radps"]],
             label="wheel left cmd",
             linewidth=0.8,
         )
         axes[3].plot(
             command_time,
-            plot_data[:, 17],
+            plot_data[:, col["wheel_right_cmd_radps"]],
             label="wheel right cmd",
             linewidth=0.8,
         )
         axes[3].plot(
             measurement_time,
-            plot_data[:, 18],
+            plot_data[:, col["wheel_left_actual_radps"]],
             label="wheel left actual",
             linewidth=0.8,
         )
         axes[3].plot(
             measurement_time,
-            plot_data[:, 19],
+            plot_data[:, col["wheel_right_actual_radps"]],
             label="wheel right actual",
             linewidth=0.8,
         )
@@ -681,6 +719,29 @@ def main():
                 raise ValueError("The Emma PPO+GRU baseline requires --ml_framework torch")
             prepare_recurrent_evaluation(experiment_cfg, resume_path)
 
+    # Resolve the command rate limit before the env is built: it is written into
+    # env_cfg, so it must be final before gym.make. The env config enables it by
+    # default; --fixed-wheel-cmd characterises the raw actuator, so it stays
+    # unlimited regardless (the same convention as probe_emma_drive.py).
+    if fixed_wheel_mode or args_cli.no_motion_acceleration_limits:
+        env_cfg.enable_motion_acceleration_limits = False
+    if getattr(env_cfg, "enable_motion_acceleration_limits", False):
+        _step_dt = env_cfg.sim.dt * env_cfg.decimation
+        _linear = env_cfg.max_linear_acceleration * env_cfg.linear_acceleration_command_scale
+        _angular = env_cfg.max_angular_acceleration * env_cfg.angular_acceleration_command_scale
+        print(
+            f"[PLAY RATE LIMIT] body-twist command bounded to {_linear:.3f} m/s^2 and "
+            f"{_angular:.3f} rad/s^2 = {_linear * _step_dt:.4f} m/s and "
+            f"{_angular * _step_dt:.4f} rad/s per {_step_dt * 1000.0:.0f} ms step",
+            flush=True,
+        )
+    else:
+        print(
+            "[PLAY RATE LIMIT] disabled: the policy command reaches the wheels "
+            "unfiltered, which is how checkpoints trained before the limiter behave.",
+            flush=True,
+        )
+
     # create isaac environment
     print("[INFO] Creating Isaac environment...", flush=True)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -752,6 +813,7 @@ def main():
             "_projected_body_twist_cmd",
             "_safe_body_twist_cmd",
             "_wheel_projection_scale",
+            "_wheel_acceleration_scale",
             "_last_wheel_command",
             "_last_wheel_actual",
             "_last_forward_speed",
