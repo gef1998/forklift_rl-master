@@ -44,26 +44,25 @@ class DomainRandCfg:
 
     # ---- 感知噪声 (step-level, 加在 raw LiDAR distance 上, min-pool 前) ----
     enable_lidar_noise: bool = True
-    lidar_noise_std: float = 0.05            # 高斯噪声 std (m)
+    lidar_noise_std: float = 0.04            # 高斯噪声 std (m)
     enable_lidar_dropout: bool = True
     lidar_dropout_prob: float = 0.02         # 每扇区丢帧概率 (min-pool 后)
 
     # ---- 动力学噪声 (episode-level, _reset_idx 中采样) ----
     enable_dynamics_noise: bool = True
     mass_scale_range: tuple = (0.85, 1.15)           # 车身质量缩放 ±15%
-    wheel_radius_scale_range: tuple = (0.98, 1.02)    # 轮径缩放 ±2%
-    com_offset_xy_range: tuple = (-0.02, 0.02)       # 质心偏移 ±2cm
-    wheel_slip_noise_std: float = 0.02                # 轮速滑移噪声 (摩擦 proxy)
+    wheel_radius_scale_range: tuple = (0.99, 1.01)    # 轮径缩放 ±2%
+    com_offset_xy_range: tuple = (-0.01, 0.01)       # 质心偏移 ±2cm
+    wheel_slip_noise_std: float = 0.01                # 轮速滑移噪声 (摩擦 proxy)
 
     # ---- 控制噪声 (step-level, _pre_physics_step 中) ----
     enable_action_noise: bool = True
     action_noise_std: float = 0.06              # signed action noise; matches old 0.03 in [0,1]
-    action_delay_max_steps: int = 10             # 最大延迟 (decimation steps, 0~40ms)
-
+    action_delay_max_steps: int = 0            # 
     # ---- 初始状态噪声 (episode-level) ----
     enable_init_noise: bool = True
-    init_pos_noise_xy: float = 0.05             # ±5cm
-    init_yaw_noise_deg: float = 5.0             # ±5°
+    init_pos_noise_xy: float = 0.025             # ±5cm
+    init_yaw_noise_deg: float = 2.5            # ±5°
 
 
 @dataclass
@@ -453,7 +452,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.2
+    nav_clearance_threshold: float = 0.3
     nav_proximity_cost_per_second: float = 0.25
     nav_time_cost_per_second: float = 0.75
 
