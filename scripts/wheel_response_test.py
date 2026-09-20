@@ -19,6 +19,10 @@ parser.add_argument("--hold_seconds", type=float, default=.5)
 parser.add_argument("--settle_seconds", type=float, default=.5)
 parser.add_argument("--output_dir", type=str, default=None)
 parser.add_argument("--disable_fabric", action="store_true", default=False)
+parser.add_argument(
+    "--no-acceleration-limits", action="store_true", default=False,
+    help="force the nominal command slew off; by default the task cfg decides",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -69,6 +73,21 @@ def _actual_body_motion(base_env) -> tuple[torch.Tensor, torch.Tensor]:
     return forward_speed, robot.data.root_ang_vel_b[:, 2]
 
 
+def _drive_value(cfg, field: str) -> float:
+    """Read one drive value back from both wheel actuator configs.
+
+    Read from ``robot_cfg.actuators`` rather than from the ``wheel_*`` cfg field
+    the actuator was built from: a runtime override of the latter would not have
+    reached the actuator, and a sweep must be distinguishable in the summary.
+    """
+    actuators = cfg.robot_cfg.actuators
+    left = float(getattr(actuators["wheel_left_actuator"], field))
+    right = float(getattr(actuators["wheel_right_actuator"], field))
+    if left != right:
+        raise ValueError(f"wheel actuators disagree on {field}: {left} != {right}")
+    return left
+
+
 def _metadata(base_env, step_dt):
     cfg = base_env.cfg
     return {
@@ -85,6 +104,8 @@ def _metadata(base_env, step_dt):
         "max_angular_velocity_radps": float(cfg.max_angular_velocity),
         "action_control_mode": str(cfg.action_control_mode),
         "motion_acceleration_limiter": bool(cfg.enable_motion_acceleration_limits),
+        "wheel_velocity_damping": _drive_value(cfg, "damping"),
+        "wheel_effort_limit_nm": _drive_value(cfg, "effort_limit_sim"),
         "step_mode": "physics_only_no_observation_reward_or_done",
     }
 
@@ -100,9 +121,16 @@ def main() -> None:
         use_fabric=not args_cli.disable_fabric,
     )
     env_cfg.action_control_mode = "body_twist"
-    # The generated profile itself has the selected acceleration. A second
-    # limiter would make the commanded curve differ between backends.
-    env_cfg.enable_motion_acceleration_limits = False
+    # Plant settings stay as the task cfg declares them — decimation, the
+    # implicit drive damping/effort limit and the nominal command slew — so an
+    # edit to emma_obs_nav_env_cfg.py is exactly what this calibration measures.
+    # The generated profile already carries the selected acceleration, so the
+    # slew limiter may still be forced off for parity with the real-robot
+    # adapter, whose commanded curve has no second limiter.
+    if args_cli.no_acceleration_limits:
+        env_cfg.enable_motion_acceleration_limits = False
+    # ---- Measurement hygiene: drop everything that would contaminate the
+    # identified actuator plant (scenario, domain randomization, sensor model).
     env_cfg.safety_control.enabled = False
     env_cfg.domain_rand.enable_lidar_noise = False
     env_cfg.domain_rand.enable_lidar_dropout = False
