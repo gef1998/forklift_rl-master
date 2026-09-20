@@ -25,6 +25,9 @@ def configure_drive_contacts(stage, robot_root: str, cfg) -> None:
         if not parent.IsValid() or not parent.IsA(UsdGeom.Cylinder):
             raise ValueError(f"Expected a cylinder rigid body at {robot_root}/{name}")
         is_drive = name.startswith("dwheel_")
+        if not is_drive and not cfg.caster_contacts_enabled:
+            UsdPhysics.CollisionAPI.Apply(parent).CreateCollisionEnabledAttr().Set(False)
+            continue
         if (is_drive and cfg.drive_wheel_collision_shape == "cylinder") or (not is_drive and radius is None):
             continue
         replacements.append((parent, is_drive))
@@ -61,6 +64,7 @@ def configure_drive_contacts(stage, robot_root: str, cfg) -> None:
             )
             print(
                 f"[Emma drive] shape={cfg.drive_wheel_collision_shape} "
-                f"caster_radius={radius} external_every_iteration="
+                f"caster_radius={radius} caster_contacts={cfg.caster_contacts_enabled} "
+                f"external_every_iteration="
                 f"{api.GetEnableExternalForcesEveryIterationAttr().Get()}", flush=True
             )

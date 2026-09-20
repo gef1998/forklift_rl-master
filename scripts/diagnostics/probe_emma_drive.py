@@ -26,6 +26,7 @@ parser.add_argument("--legacy", action="store_true")
 parser.add_argument("--no-acceleration-limits", action="store_true")
 parser.add_argument("--linear-command-scale", type=float)
 parser.add_argument("--effort-limit", type=float, default=4.15)
+parser.add_argument("--armature", type=float, default=0.0)
 parser.add_argument("--pos-iters", type=int, default=8)
 parser.add_argument("--vel-iters", type=int, default=4)
 parser.add_argument("--contacts", action="store_true")
@@ -50,6 +51,15 @@ from emma_rl.tasks.direct.emma.emma_obs_nav.emma_obs_nav_env import EmmaObsNavEn
 task = "Emma-RL-ObsNav-Direct-v0"
 cfg = parse_env_cfg(task, device=args.device, num_envs=args.num_envs)
 cfg.seed = 0
+# Diagnostics commonly run beside a large training job.  The task capacities
+# target 4096 environments; scale them down here so a 1--256 environment probe
+# does not reserve several GiB before physics starts.
+if args.num_envs <= 64:
+    cfg.sim.physx.gpu_found_lost_pairs_capacity = 2**21
+    cfg.sim.physx.gpu_max_rigid_patch_count = 2**17
+elif args.num_envs <= 256:
+    cfg.sim.physx.gpu_found_lost_pairs_capacity = 2**23
+    cfg.sim.physx.gpu_max_rigid_patch_count = 2**19
 cfg.action_control_mode = "wheel_velocity"
 cfg.safety_control.enabled = False
 for field in ("enable_lidar_noise", "enable_lidar_dropout", "enable_dynamics_noise", "enable_action_noise", "enable_init_noise"):
@@ -71,6 +81,7 @@ if args.linear_command_scale is not None:
 for name in ("wheel_left_actuator", "wheel_right_actuator"):
     cfg.robot_cfg.actuators[name].effort_limit_sim = args.effort_limit
     cfg.robot_cfg.actuators[name].effort_limit = args.effort_limit
+    cfg.robot_cfg.actuators[name].armature = args.armature
 props = cfg.robot_cfg.spawn.articulation_props
 props.solver_position_iteration_count = args.pos_iters
 props.solver_velocity_iteration_count = args.vel_iters

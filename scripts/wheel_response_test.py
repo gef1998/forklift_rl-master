@@ -19,6 +19,18 @@ parser.add_argument("--hold_seconds", type=float, default=.5)
 parser.add_argument("--settle_seconds", type=float, default=.5)
 parser.add_argument("--output_dir", type=str, default=None)
 parser.add_argument("--disable_fabric", action="store_true", default=False)
+parser.add_argument("--position-iterations", type=int, default=None)
+parser.add_argument("--velocity-iterations", type=int, default=None)
+parser.add_argument("--sim-dt", type=float, default=None)
+parser.add_argument("--decimation", type=int, default=None)
+parser.add_argument("--wheel-armature", type=float, default=None)
+parser.add_argument("--wheel-damping", type=float, default=None)
+parser.add_argument("--wheel-effort-limit", type=float, default=None)
+parser.add_argument("--caster-friction", type=float, default=None,
+                    help="override both caster static and dynamic friction")
+parser.add_argument("--caster-contacts", choices=("cfg", "on", "off"), default="cfg")
+parser.add_argument("--external-forces-every-iteration", choices=("cfg", "on", "off"), default="cfg")
+parser.add_argument("--self-collisions", choices=("cfg", "on", "off"), default="cfg")
 parser.add_argument(
     "--no-acceleration-limits", action="store_true", default=False,
     help="force the nominal command slew off; by default the task cfg decides",
@@ -90,6 +102,10 @@ def _drive_value(cfg, field: str) -> float:
 
 def _metadata(base_env, step_dt):
     cfg = base_env.cfg
+    left_id, right_id = int(base_env.left_ids[0]), int(base_env.right_ids[0])
+    armature = base_env.robot.data.default_joint_armature[0, [left_id, right_id]]
+    if not torch.allclose(armature[0], armature[1]):
+        raise ValueError("wheel actuators disagree on armature")
     return {
         "backend": "isaac_lab_physics",
         "task": args_cli.task,
@@ -97,6 +113,10 @@ def _metadata(base_env, step_dt):
         "sim_dt_s": float(cfg.sim.dt),
         "decimation": int(cfg.decimation),
         "control_step_dt_s": step_dt,
+        "solver_position_iteration_count": int(
+            cfg.robot_cfg.spawn.articulation_props.solver_position_iteration_count),
+        "solver_velocity_iteration_count": int(
+            cfg.robot_cfg.spawn.articulation_props.solver_velocity_iteration_count),
         "wheel_radius_m": float(cfg.wheel_radius),
         "wheel_base_m": float(cfg.wheel_base),
         "wheel_max_velocity_radps": float(cfg.wheel_max_velocity),
@@ -106,6 +126,14 @@ def _metadata(base_env, step_dt):
         "motion_acceleration_limiter": bool(cfg.enable_motion_acceleration_limits),
         "wheel_velocity_damping": _drive_value(cfg, "damping"),
         "wheel_effort_limit_nm": _drive_value(cfg, "effort_limit_sim"),
+        "wheel_armature_kgm2": float(armature[0].item()),
+        "self_collisions": bool(
+            cfg.robot_cfg.spawn.articulation_props.enabled_self_collisions),
+        "caster_static_friction": float(cfg.caster_static_friction),
+        "caster_dynamic_friction": float(cfg.caster_dynamic_friction),
+        "caster_contacts_enabled": bool(cfg.caster_contacts_enabled),
+        "external_forces_every_iteration": bool(
+            cfg.drive_enable_external_forces_every_iteration),
         "step_mode": "physics_only_no_observation_reward_or_done",
     }
 
@@ -120,7 +148,57 @@ def main() -> None:
         args_cli.task, device=args_cli.device, num_envs=1,
         use_fabric=not args_cli.disable_fabric,
     )
+    env_cfg.seed = 0
     env_cfg.action_control_mode = "body_twist"
+    # The task sizes these GPU contact buffers for thousands of environments.
+    # This calibration creates one environment, so retaining those capacities
+    # wastes several GiB and can prevent a diagnostic run beside training.
+    env_cfg.sim.physx.gpu_found_lost_pairs_capacity = 2**18
+    env_cfg.sim.physx.gpu_max_rigid_patch_count = 2**16
+    props = env_cfg.robot_cfg.spawn.articulation_props
+    if args_cli.position_iterations is not None:
+        if args_cli.position_iterations <= 0:
+            raise ValueError("position iterations must be positive")
+        props.solver_position_iteration_count = args_cli.position_iterations
+    if args_cli.velocity_iterations is not None:
+        if args_cli.velocity_iterations <= 0:
+            raise ValueError("velocity iterations must be positive")
+        props.solver_velocity_iteration_count = args_cli.velocity_iterations
+    if args_cli.sim_dt is not None:
+        if args_cli.sim_dt <= 0.:
+            raise ValueError("simulation dt must be positive")
+        env_cfg.sim.dt = args_cli.sim_dt
+    if args_cli.decimation is not None:
+        if args_cli.decimation <= 0:
+            raise ValueError("decimation must be positive")
+        env_cfg.decimation = args_cli.decimation
+        env_cfg.sim.render_interval = args_cli.decimation
+    if args_cli.self_collisions != "cfg":
+        props.enabled_self_collisions = args_cli.self_collisions == "on"
+    if args_cli.caster_friction is not None:
+        if args_cli.caster_friction < 0.:
+            raise ValueError("caster friction must be non-negative")
+        env_cfg.caster_static_friction = args_cli.caster_friction
+        env_cfg.caster_dynamic_friction = args_cli.caster_friction
+    if args_cli.caster_contacts != "cfg":
+        env_cfg.caster_contacts_enabled = args_cli.caster_contacts == "on"
+    if args_cli.external_forces_every_iteration != "cfg":
+        env_cfg.drive_enable_external_forces_every_iteration = (
+            args_cli.external_forces_every_iteration == "on")
+    for actuator_name in ("wheel_left_actuator", "wheel_right_actuator"):
+        actuator = env_cfg.robot_cfg.actuators[actuator_name]
+        if args_cli.wheel_armature is not None:
+            if args_cli.wheel_armature < 0.:
+                raise ValueError("wheel armature must be non-negative")
+            actuator.armature = args_cli.wheel_armature
+        if args_cli.wheel_damping is not None:
+            if args_cli.wheel_damping <= 0.:
+                raise ValueError("wheel damping must be positive")
+            actuator.damping = args_cli.wheel_damping
+        if args_cli.wheel_effort_limit is not None:
+            if args_cli.wheel_effort_limit <= 0.:
+                raise ValueError("wheel effort limit must be positive")
+            actuator.effort_limit_sim = args_cli.wheel_effort_limit
     # Plant settings stay as the task cfg declares them — decimation, the
     # implicit drive damping/effort limit and the nominal command slew — so an
     # edit to emma_obs_nav_env_cfg.py is exactly what this calibration measures.
@@ -165,6 +243,17 @@ def main() -> None:
         # resets after physics-only stepping can terminate Isaac Sim because
         # the normal observation/reward lifecycle was deliberately bypassed.
         env.reset()
+        # The task reset deliberately samples a random navigation spawn.  A
+        # slow linear sweep can travel several metres before returning and hit
+        # an arena wall, which invalidates actuator identification.  Keep this
+        # plant test at the centre with a deterministic heading.
+        pose = base_env.robot.data.default_root_state[:, :7].clone()
+        pose[:, :3] = base_env.scene.env_origins
+        pose[:, 2] += .045
+        pose[:, 3:] = pose.new_tensor([1., 0., 0., 0.])
+        base_env.robot.write_root_pose_to_sim(pose)
+        base_env.robot.write_root_velocity_to_sim(
+            torch.zeros((1, 6), device=device))
         for run in runs:
             print("[CALIBRATION] %s: settling" % run["run_id"], flush=True)
             zero = torch.zeros((1, 2), device=device)

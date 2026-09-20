@@ -160,8 +160,8 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     wheel_max_velocity: float = 20.0       # rad/s
     # Effective material pairs use min on both sides: drive 0.8/0.6,
     # chassis 0.5/0.5, caster 0.02/0.02. Use PhysxMaterialAPI, not bare attrs.
-    ground_static_friction: float = 0.8
-    ground_dynamic_friction: float = 0.6
+    ground_static_friction: float = 0.5
+    ground_dynamic_friction: float = 0.5
     # 驱动轮材质。PhysX 用接触双方材质合成摩擦系数; 轮子若没有材质就退化成
     # PhysX 默认值 (~0.5), 低于配置值, 所以两侧都必须显式给材质。
     wheel_static_friction: float = 1.2
@@ -173,6 +173,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # bias support toward the drive wheels. See the report for legacy sweeps.
     caster_static_friction: float = 0.02
     caster_dynamic_friction: float = 0.02
+    caster_contacts_enabled: bool = True
 
     # ---- Drive/contact model (see docs/emma_drive_diagnostics.md) ----
     # Separate collision proxies preserve visible tires and link inertias.
@@ -186,6 +187,10 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # increments. Do not infer actual motor torque from damping * error.
     wheel_velocity_damping: float = 200.0
     wheel_effort_limit: float = 4.15
+    # Reflected wheel-joint inertia. Joint-response sweeps showed that
+    # 0.015 kg*m^2 lets TGS 4/2 reproduce the measured actuator lag while
+    # improving the paired 64-env throughput over the 8/4 configuration.
+    wheel_armature: float = 0.015
 
     # Nominal command slew limits; safety braking retains priority.
     # Substeps interpolate commands. These are not hard bounds on measured
@@ -213,10 +218,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
             usd_path=_EMMA_USD,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
-                # Keep 8/4: the contact-model correction avoids doubling the
-                # position iterations. Benchmark results are recorded in docs.
-                solver_position_iteration_count=8,
-                solver_velocity_iteration_count=4,
+                # Armature 0.015 conditions the wheel/contact response enough
+                # for the 4/2 budget. See the six-profile validation and the
+                # high-speed transient boundary in the drive report.
+                solver_position_iteration_count=4,
+                solver_velocity_iteration_count=2,
             ),
         ),
         init_state=ArticulationCfg.InitialStateCfg(
@@ -230,6 +236,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
                 velocity_limit_sim=wheel_max_velocity,
                 stiffness=0.0,
                 damping=wheel_velocity_damping,
+                armature=wheel_armature,
                 # 隐式执行器上 effort_limit_sim 与 effort_limit 等价, 用前者。
                 effort_limit_sim=wheel_effort_limit,
             ),
@@ -239,6 +246,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
                 velocity_limit_sim=wheel_max_velocity,
                 stiffness=0.0,
                 damping=wheel_velocity_damping,
+                armature=wheel_armature,
                 effort_limit_sim=wheel_effort_limit,
             ),
             # Lift and caster joints retain their USD properties; only the
