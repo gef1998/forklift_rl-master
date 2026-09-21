@@ -24,13 +24,15 @@ wheel_armature = 0.015
 wheel_velocity_damping = 200.0
 wheel_effort_limit = 4.15
 enable_motion_acceleration_limits = True
+enable_motion_command_low_pass = True
+motion_command_low_pass_tau_s = 0.06
 max_linear_acceleration = 1.0
-max_angular_acceleration = 2.0
+max_angular_acceleration = 1.5
 linear_acceleration_command_scale = 0.90
 angular_acceleration_command_scale = 0.94
 ```
 
-硬件规格仍分别为 1.0 m/s²、2.0 rad/s²。正常下发指令使用 0.90 m/s²、1.88 rad/s²，给实测跟踪超调留余量。它们是单独保存的校准系数，不是把硬件上限改小后宣称精确匹配。
+当前正常下发指令使用 0.90 m/s²、1.41 rad/s²。名义轮速命令在可行域投影之后、加速度限制之前增加精确离散的一阶低通：`alpha = 1-exp(-dt/tau)`；`tau=0.06 s` 在 50 Hz 下对应 `alpha≈0.283`。安全制动位于低通和斜率限制之后，不受平滑延迟。
 
 ## 结论与证据
 

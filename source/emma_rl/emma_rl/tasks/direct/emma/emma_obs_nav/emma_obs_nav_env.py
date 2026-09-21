@@ -34,6 +34,7 @@ import isaaclab.utils.math as math_utils
 from .action_control import (
     actions_to_raw_wheel_velocities,
     differential_drive_kinematic_limits,
+    low_pass_wheel_velocity_command,
     normalize_action_control_mode,
     limit_wheel_velocity_acceleration,
     project_wheel_velocities_to_motion_limits,
@@ -78,6 +79,11 @@ class EmmaObsNavEnv(DirectRLEnv):
             value = getattr(cfg, name)
             if not math.isfinite(value) or not 0.0 < value <= 1.0:
                 raise ValueError(f"{name} must be in (0, 1]")
+        if cfg.enable_motion_command_low_pass and (
+            not math.isfinite(cfg.motion_command_low_pass_tau_s)
+            or cfg.motion_command_low_pass_tau_s <= 0.0
+        ):
+            raise ValueError("motion_command_low_pass_tau_s must be finite and positive")
         # 必须在 super().__init__() 之前设置 (因为 _setup_scene 在 super 内调用)
         self._world_mode = cfg.world_mode.strip().lower()
         if self._world_mode not in (
@@ -363,6 +369,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._last_wheel_actual = torch.zeros_like(self.actions)
         self._raw_wheel_vel_cmd = torch.zeros_like(self.actions)
         self._feasible_wheel_vel_cmd = torch.zeros_like(self.actions)
+        self._filtered_wheel_vel_cmd = torch.zeros_like(self.actions)
         self._wheel_vel_cmd = torch.zeros_like(self.actions)
         self._wheel_target_start = torch.zeros_like(self.actions)
         self._joint_vel_cmd = torch.zeros_like(self.actions)
@@ -947,6 +954,10 @@ class EmmaObsNavEnv(DirectRLEnv):
         ns = self._get_noise_scale()
         n = actions.shape[0]   # active env count (may differ from self.num_envs)
         actions = actions.clamp(-1.0, 1.0)
+        # mask = torch.abs(self.goal_heading_sin) < 0.1
+        # actions[1] = actions[1] * torch.where(
+        #     mask, 0.2, 1.0)
+
         self._policy_actions[:n] = actions
 
         # ---- Action delay (ring buffer) ----
@@ -995,18 +1006,28 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._dr_wheel_r_scale[:n],
         )
 
+        if cfg.enable_motion_command_low_pass:
+            filtered_wheels, _ = low_pass_wheel_velocity_command(
+                feasible_wheels,
+                self._wheel_vel_cmd[:n],
+                self.step_dt,
+                cfg.motion_command_low_pass_tau_s,
+            )
+        else:
+            filtered_wheels = feasible_wheels
+
         # Limit nominal acceleration before the shield. Its braking/emergency
         # decisions retain priority over motion smoothing.
         if cfg.enable_motion_acceleration_limits:
             limited_wheels, acceleration_scale = limit_wheel_velocity_acceleration(
-                feasible_wheels, self._wheel_vel_cmd[:n], self.step_dt,
+                filtered_wheels, self._wheel_vel_cmd[:n], self.step_dt,
                 cfg.wheel_radius, cfg.wheel_base,
                 cfg.max_linear_acceleration * cfg.linear_acceleration_command_scale,
                 cfg.max_angular_acceleration * cfg.angular_acceleration_command_scale,
                 self._dr_wheel_r_scale[:n],
             )
         else:
-            limited_wheels = feasible_wheels
+            limited_wheels = filtered_wheels
             acceleration_scale = torch.ones_like(projection_scale)
         self._wheel_acceleration_scale[:n] = acceleration_scale
 
@@ -1040,6 +1061,7 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         self._raw_wheel_vel_cmd[:n] = raw_wheels
         self._feasible_wheel_vel_cmd[:n] = feasible_wheels
+        self._filtered_wheel_vel_cmd[:n] = filtered_wheels
         self._wheel_target_start.copy_(self._wheel_vel_cmd)
         self._action_substep = 0
         self._wheel_projection_scale[:n] = projection_scale
@@ -1639,6 +1661,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             time_enc,                  # 126:134  (8)
             self._prev_policy_actions,  # 134:136  (2)
         ], dim=-1)
+        self.goal_heading_sin = goal_dir_b[:, 1]
         assert obs.shape[-1] == cfg.single_obs_dim, \
             f"obs dim mismatch: {obs.shape[-1]} != {cfg.single_obs_dim}"
         return obs
@@ -2085,6 +2108,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._prev_policy_actions[env_ids] = 0.0
         self._raw_wheel_vel_cmd[env_ids] = 0.0
         self._feasible_wheel_vel_cmd[env_ids] = 0.0
+        self._filtered_wheel_vel_cmd[env_ids] = 0.0
         self._wheel_vel_cmd[env_ids] = 0.0
         self._wheel_target_start[env_ids] = 0.0
         self._joint_vel_cmd[env_ids] = 0.0

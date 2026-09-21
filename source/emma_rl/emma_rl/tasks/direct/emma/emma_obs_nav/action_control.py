@@ -9,6 +9,26 @@ import torch
 SUPPORTED_ACTION_CONTROL_MODES = ("body_twist", "wheel_velocity")
 
 
+def low_pass_wheel_velocity_command(
+    desired_wheels: torch.Tensor,
+    previous_wheels: torch.Tensor,
+    dt: float,
+    time_constant_s: float,
+) -> tuple[torch.Tensor, float]:
+    """Apply an exact-discretized first-order low-pass to wheel commands.
+
+    Both wheels use the same coefficient, so filtering two feasible command
+    endpoints stays inside their convex speed-feasible set. Safety braking is
+    applied later and therefore bypasses this nominal-command filter.
+    """
+    if desired_wheels.shape != previous_wheels.shape:
+        raise ValueError("desired and previous wheels must have the same shape")
+    if any(not math.isfinite(x) or x <= 0 for x in (dt, time_constant_s)):
+        raise ValueError("dt and low-pass time constant must be finite and positive")
+    alpha = -math.expm1(-dt / time_constant_s)
+    return previous_wheels + alpha * (desired_wheels - previous_wheels), alpha
+
+
 def limit_wheel_velocity_acceleration(
     desired_wheels: torch.Tensor,
     previous_wheels: torch.Tensor,

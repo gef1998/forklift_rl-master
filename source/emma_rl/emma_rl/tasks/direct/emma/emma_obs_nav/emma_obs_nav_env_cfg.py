@@ -196,15 +196,19 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Substeps interpolate commands. These are not hard bounds on measured
     # acceleration during collision impulses or initial settling.
     enable_motion_acceleration_limits: bool = True
+    # Exact first-order low-pass on nominal wheel commands, before the slew
+    # limiter. tau=0.06 s gives alpha=0.283 at the 50 Hz control rate.
+    enable_motion_command_low_pass: bool = True
+    motion_command_low_pass_tau_s: float = 0.06
     max_linear_acceleration: float = 1.0   # m/s^2
-    max_angular_acceleration: float = 2.0  # rad/s^2
+    max_angular_acceleration: float = 1.5  # rad/s^2
     # Command headroom for measured tracking overshoot (settled start/reversal).
     # Keep the hardware specifications above distinct from this calibration.
     linear_acceleration_command_scale: float = 0.90
     angular_acceleration_command_scale: float = 0.94
 
     sync_body_velocity_limits_to_wheels: bool = False
-    max_linear_velocity: float = 0.66
+    max_linear_velocity: float = 0.7
     max_angular_velocity: float = 1.5
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
@@ -466,4 +470,4 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
 
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.
-    nav_action_change_scale: float = 0.05
+    nav_action_change_scale: float = 0.08

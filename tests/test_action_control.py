@@ -307,6 +307,32 @@ def test_invalid_acceleration_configuration_is_rejected():
             raise AssertionError('invalid acceleration configuration accepted')
 
 
+def test_command_low_pass_has_exact_step_response_and_shared_alpha():
+    desired = torch.tensor([[8.0, 2.0]])
+    value = torch.zeros_like(desired)
+    dt, tau = 0.02, 0.06
+    expected_alpha = 1.0 - math.exp(-dt / tau)
+    for step in range(1, 11):
+        value, alpha = action_control.low_pass_wheel_velocity_command(
+            desired, value, dt, tau
+        )
+        assert abs(alpha - expected_alpha) < 1e-12
+        expected = desired * (1.0 - math.exp(-step * dt / tau))
+        torch.testing.assert_close(value, expected, atol=2e-6, rtol=0)
+
+
+def test_invalid_low_pass_configuration_is_rejected():
+    for dt, tau in [(0.0, 0.06), (0.02, 0.0), (0.02, float("nan"))]:
+        try:
+            action_control.low_pass_wheel_velocity_command(
+                torch.zeros(1, 2), torch.zeros(1, 2), dt, tau
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid low-pass configuration accepted")
+
+
 def test_invalid_action_control_mode_is_rejected():
     try:
         _map(torch.zeros(1, 2), "unknown")
@@ -330,6 +356,8 @@ if __name__ == "__main__":
         test_nyquist_yaw_dither_is_bounded_by_the_calibrated_acceleration,
         test_rate_limit_is_transparent_for_a_slow_steering_command,
         test_invalid_acceleration_configuration_is_rejected,
+        test_command_low_pass_has_exact_step_response_and_shared_alpha,
+        test_invalid_low_pass_configuration_is_rejected,
     ]
     for test in tests:
         test()
