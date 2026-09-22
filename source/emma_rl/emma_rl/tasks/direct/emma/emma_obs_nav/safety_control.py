@@ -1,4 +1,4 @@
-"""Pure Torch runtime safety projection for the Emma differential drive."""
+"""Forward-clearance speed governor for the Emma differential drive."""
 
 from __future__ import annotations
 
@@ -20,24 +20,52 @@ def _as_batch_tensor(
     raise ValueError(f"{name} must be scalar or have shape {tuple(reference.shape)}")
 
 
+def _effective_radius(
+    reference: torch.Tensor,
+    wheel_radius: float,
+    wheel_radius_scale: torch.Tensor | None,
+) -> torch.Tensor:
+    radius = reference.new_full((reference.shape[0],), wheel_radius)
+    if wheel_radius_scale is not None:
+        radius = radius * _as_batch_tensor(
+            wheel_radius_scale, radius, "wheel_radius_scale"
+        )
+    return radius
+
+
 def _wheel_velocities_to_twist(
     wheel_velocities: torch.Tensor,
     wheel_radius: float,
     wheel_base: float,
     wheel_radius_scale: torch.Tensor | None,
 ) -> torch.Tensor:
-    effective_radius = wheel_velocities.new_full(
-        (wheel_velocities.shape[0],), wheel_radius
-    )
-    if wheel_radius_scale is not None:
-        effective_radius = effective_radius * _as_batch_tensor(
-            wheel_radius_scale, effective_radius, "wheel_radius_scale"
-        )
+    radius = _effective_radius(wheel_velocities, wheel_radius, wheel_radius_scale)
     left = wheel_velocities[:, 0]
     right = wheel_velocities[:, 1]
-    linear = 0.5 * effective_radius * (left + right)
-    angular = effective_radius * (right - left) / wheel_base
+    linear = 0.5 * radius * (left + right)
+    angular = radius * (right - left) / wheel_base
     return torch.stack((linear, angular), dim=-1)
+
+
+def _twist_to_feasible_wheels(
+    twist: torch.Tensor,
+    wheel_radius: float,
+    wheel_base: float,
+    wheel_max_velocity: float,
+    wheel_radius_scale: torch.Tensor | None,
+) -> torch.Tensor:
+    radius = _effective_radius(twist, wheel_radius, wheel_radius_scale)
+    half_base = wheel_base / 2.0
+    wheels = torch.stack(
+        (
+            (twist[:, 0] - twist[:, 1] * half_base) / radius,
+            (twist[:, 0] + twist[:, 1] * half_base) / radius,
+        ),
+        dim=-1,
+    )
+    peak = wheels.abs().amax(dim=-1)
+    projection = (wheel_max_velocity / peak.clamp_min(1.0e-8)).clamp(max=1.0)
+    return wheels * projection.unsqueeze(-1)
 
 
 def apply_safety_control(
@@ -48,35 +76,25 @@ def apply_safety_control(
     *,
     wheel_radius: float,
     wheel_base: float,
-    lateral_accel_limit: float,
-    braking_deceleration: float,
-    reaction_time_s: float | torch.Tensor,
-    static_margin: float,
-    possible_obstacle_speed: float,
+    wheel_max_velocity: float,
     forward_half_angle_deg: float,
-    rear_half_angle_deg: float,
-    ttc_slow_s: float,
-    ttc_stop_s: float,
+    stop_clearance: float,
+    full_speed_clearance: float,
+    min_forward_speed_scale: float,
     max_lidar_aoi_s: float,
     wheel_radius_scale: torch.Tensor | None = None,
     has_valid_scan: torch.Tensor | None = None,
     enabled: bool = True,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-    """Project wheel targets into a conservative dynamic-obstacle safe set.
+    """Reduce only positive body velocity as forward clearance decreases.
 
-    The input wheel targets are assumed to have already passed through action
-    delay/noise and the wheel-speed feasibility projection. This function only
-    scales both wheels together, so it cannot introduce a new wheel-limit
-    violation and preserves the requested path curvature whenever it slows.
-
-    ``shield_clearance`` is footprint clearance (not sensor range) from the
-    last valid scan, ego-motion-warped into the current body frame.
-
-    ``enabled=False`` is an unsafe experimental ablation: S1 curve limiting,
-    S2 braking and S3 emergency stopping are all bypassed. Non-finite wheel
-    commands are still replaced by zero so NaNs are never sent to an actuator.
+    ``shield_clearance`` is distance outside the rectangular robot footprint.
+    Positive velocity uses ``min_forward_speed_scale`` at and below
+    ``stop_clearance``, is unchanged at ``full_speed_clearance``, and follows a
+    shifted smoothstep between them. Angular and reverse commands remain
+    available so the policy can turn away or recover. An unusable scan still
+    blocks positive velocity instead of applying the configured floor.
     """
-
     if wheel_targets.ndim != 2 or wheel_targets.shape[1] != 2:
         raise ValueError("wheel_targets must have shape (N, 2)")
     if shield_clearance.ndim != 2 or shield_clearance.shape[0] != wheel_targets.shape[0]:
@@ -92,180 +110,109 @@ def apply_safety_control(
     else:
         raise ValueError("sector_angles must have shape (sectors,) or (N, sectors)")
 
-    positive_values = {
+    positive = {
         "wheel_radius": wheel_radius,
         "wheel_base": wheel_base,
-        "lateral_accel_limit": lateral_accel_limit,
-        "braking_deceleration": braking_deceleration,
-        "ttc_slow_s": ttc_slow_s,
-        "ttc_stop_s": ttc_stop_s,
+        "wheel_max_velocity": wheel_max_velocity,
+        "forward_half_angle_deg": forward_half_angle_deg,
+        "full_speed_clearance": full_speed_clearance,
         "max_lidar_aoi_s": max_lidar_aoi_s,
     }
-    for name, value in positive_values.items():
+    for name, value in positive.items():
         if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{name} must be positive")
+            raise ValueError(f"{name} must be finite and positive")
+    if not math.isfinite(stop_clearance) or stop_clearance < 0:
+        raise ValueError("stop_clearance must be finite and non-negative")
+    if full_speed_clearance <= stop_clearance:
+        raise ValueError("full_speed_clearance must exceed stop_clearance")
     if (
-        not math.isfinite(static_margin)
-        or not math.isfinite(possible_obstacle_speed)
-        or static_margin < 0
-        or possible_obstacle_speed < 0
+        not math.isfinite(min_forward_speed_scale)
+        or min_forward_speed_scale < 0
+        or min_forward_speed_scale >= 1
     ):
-        raise ValueError("safety margins and obstacle speed must be non-negative")
-    if (
-        not math.isfinite(forward_half_angle_deg)
-        or not math.isfinite(rear_half_angle_deg)
-        or not 0 < forward_half_angle_deg <= 90
-        or not 0 < rear_half_angle_deg <= 90
-    ):
-        raise ValueError("safety cone half angles must be in (0, 90]")
-    if ttc_stop_s >= ttc_slow_s:
-        raise ValueError("ttc_stop_s must be smaller than ttc_slow_s")
+        raise ValueError("min_forward_speed_scale must be in [0, 1)")
+    if forward_half_angle_deg > 90:
+        raise ValueError("forward_half_angle_deg must not exceed 90")
 
-    finite_inputs = torch.isfinite(wheel_targets).all(dim=-1)
-    finite_inputs &= torch.isfinite(shield_clearance).all(dim=-1)
-    finite_inputs &= torch.isfinite(angles).all(dim=-1)
-    finite_inputs &= torch.isfinite(shield_aoi)
+    finite_wheels = torch.isfinite(wheel_targets).all(dim=-1)
     candidate_wheels = torch.where(
         torch.isfinite(wheel_targets), wheel_targets, torch.zeros_like(wheel_targets)
     )
-    clearance = torch.where(
-        torch.isfinite(shield_clearance),
-        shield_clearance,
-        torch.full_like(shield_clearance, -float("inf")),
+    raw_twist = _wheel_velocities_to_twist(
+        candidate_wheels, wheel_radius, wheel_base, wheel_radius_scale
     )
-    angles = torch.where(torch.isfinite(angles), angles, torch.zeros_like(angles))
 
-    batch_reference = shield_aoi.to(dtype=wheel_targets.dtype)
-    reaction_time = _as_batch_tensor(
-        reaction_time_s, batch_reference, "reaction_time_s"
+    finite_sectors = torch.isfinite(shield_clearance) & torch.isfinite(angles)
+    safe_angles = torch.where(torch.isfinite(angles), angles, torch.zeros_like(angles))
+    front_mask = torch.cos(safe_angles) >= math.cos(
+        math.radians(forward_half_angle_deg)
     )
-    finite_inputs &= torch.isfinite(reaction_time)
-    reaction_time = torch.nan_to_num(
-        reaction_time, nan=max_lidar_aoi_s, posinf=max_lidar_aoi_s, neginf=0.0
-    ).clamp_min(0.0)
+    usable_front = front_mask & finite_sectors
+    inf = torch.full_like(shield_clearance, float("inf"))
+    front_clearance = torch.where(
+        usable_front, shield_clearance, inf
+    ).amin(dim=-1)
+    front_covered = usable_front.any(dim=-1)
+
     aoi = torch.nan_to_num(
         shield_aoi.to(dtype=wheel_targets.dtype),
         nan=max_lidar_aoi_s + 1.0,
         posinf=max_lidar_aoi_s + 1.0,
         neginf=0.0,
     ).clamp_min(0.0)
-    safe_radius_scale = None
-    if wheel_radius_scale is not None:
-        radius_scale = _as_batch_tensor(
-            wheel_radius_scale, batch_reference, "wheel_radius_scale"
-        )
-        finite_inputs &= torch.isfinite(radius_scale) & (radius_scale > 0.0)
-        safe_radius_scale = torch.where(
-            torch.isfinite(radius_scale) & (radius_scale > 0.0),
-            radius_scale,
-            torch.ones_like(radius_scale),
-        )
-
-    # S1: scale both wheels so a_lat = |v * omega| stays within the limit.
-    raw_twist = _wheel_velocities_to_twist(
-        candidate_wheels, wheel_radius, wheel_base, safe_radius_scale
-    )
-    lateral_accel = (raw_twist[:, 0] * raw_twist[:, 1]).abs()
-    if enabled:
-        curve_scale = torch.sqrt(
-            candidate_wheels.new_tensor(lateral_accel_limit)
-            / lateral_accel.clamp_min(1.0e-8)
-        ).clamp(max=1.0)
-    else:
-        curve_scale = torch.ones_like(lateral_accel)
-    curve_safe_wheels = candidate_wheels * curve_scale.unsqueeze(-1)
-    curve_twist = _wheel_velocities_to_twist(
-        curve_safe_wheels, wheel_radius, wheel_base, safe_radius_scale
-    )
-    speed = curve_twist[:, 0].abs()
-
-    # Select clearance in the direction of travel. In-place rotation has zero
-    # translational braking demand; the stale/invalid fail-safe still applies.
-    cos_angles = torch.cos(angles)
-    front_mask = cos_angles >= math.cos(math.radians(forward_half_angle_deg))
-    rear_mask = cos_angles <= -math.cos(math.radians(rear_half_angle_deg))
-    inf = torch.full_like(clearance, float("inf"))
-    front_clearance = torch.where(front_mask, clearance, inf).amin(dim=-1)
-    rear_clearance = torch.where(rear_mask, clearance, inf).amin(dim=-1)
-    travel_clearance = torch.where(
-        curve_twist[:, 0] < 0.0, rear_clearance, front_clearance
-    )
-    travel_covered = torch.where(
-        curve_twist[:, 0] < 0.0, rear_mask.any(dim=-1), front_mask.any(dim=-1)
-    )
-
-    obstacle_speed = candidate_wheels.new_tensor(possible_obstacle_speed)
-    d_now_lower = travel_clearance - static_margin - obstacle_speed * aoi
-
-    # S2: dynamic-obstacle braking envelope. The obstacle is allowed to move
-    # toward the robot during both future reaction time and robot braking.
-    decel = candidate_wheels.new_tensor(braking_deceleration)
-    b_term = reaction_time + obstacle_speed / decel
-    d_budget = d_now_lower - obstacle_speed * reaction_time
-    safe_speed_braking = decel * (
-        torch.sqrt(b_term.square() + 2.0 * d_budget.clamp_min(0.0) / decel)
-        - b_term
-    )
-    safe_speed_braking = safe_speed_braking.clamp_min(0.0)
-
-    # Also keep the current conservative TTC above the slow threshold.
-    safe_speed_ttc = (
-        d_now_lower.clamp_min(0.0) / ttc_slow_s - obstacle_speed
-    ).clamp_min(0.0)
-    safe_speed = torch.minimum(safe_speed_braking, safe_speed_ttc)
-    if enabled:
-        brake_scale = torch.where(
-            speed > 1.0e-8,
-            (safe_speed / speed.clamp_min(1.0e-8)).clamp(max=1.0),
-            torch.ones_like(speed),
-        )
-    else:
-        brake_scale = torch.ones_like(speed)
-    brake_safe_wheels = curve_safe_wheels * brake_scale.unsqueeze(-1)
-
-    # S3: fail closed on emergency TTC, exhausted clearance, stale data, or
-    # absence of any delivered scan. An emergency stop bypasses smooth scaling.
-    closing_speed_bound = speed + obstacle_speed
-    min_ttc = torch.where(
-        closing_speed_bound > 1.0e-8,
-        d_now_lower / closing_speed_bound,
-        torch.full_like(closing_speed_bound, float("inf")),
-    )
-    emergency = torch.zeros_like(speed, dtype=torch.bool)
-    if enabled:
-        # An empty travel cone is unobserved, not infinitely clear. Keep pure
-        # rotation's existing semantics; translational motion must be observed.
-        emergency |= (speed > 1.0e-8) & ~travel_covered
-        emergency |= (min_ttc < ttc_stop_s) | (d_now_lower <= 0.0)
-        emergency |= aoi > max_lidar_aoi_s
-        emergency |= ~finite_inputs
-    if enabled and has_valid_scan is not None:
+    scan_usable = finite_wheels & front_covered & (aoi <= max_lidar_aoi_s)
+    if has_valid_scan is not None:
         if has_valid_scan.shape != (wheel_targets.shape[0],):
             raise ValueError("has_valid_scan must have shape (N,)")
-        emergency |= ~has_valid_scan.to(dtype=torch.bool)
+        scan_usable &= has_valid_scan.to(dtype=torch.bool)
 
-    safe_wheels = torch.where(
-        emergency.unsqueeze(-1), torch.zeros_like(brake_safe_wheels), brake_safe_wheels
+    normalized = (
+        (front_clearance - stop_clearance)
+        / (full_speed_clearance - stop_clearance)
+    ).clamp(0.0, 1.0)
+    smoothstep = normalized.square() * (3.0 - 2.0 * normalized)
+    clearance_scale = min_forward_speed_scale + (
+        1.0 - min_forward_speed_scale
+    ) * smoothstep
+    forward_motion = raw_twist[:, 0] > 1.0e-8
+    if enabled:
+        forward_scale = torch.where(
+            forward_motion & scan_usable,
+            clearance_scale,
+            torch.where(
+                forward_motion,
+                torch.zeros_like(clearance_scale),
+                torch.ones_like(clearance_scale),
+            ),
+        )
+    else:
+        forward_scale = torch.ones_like(clearance_scale)
+
+    safe_twist_target = torch.stack(
+        (raw_twist[:, 0] * forward_scale, raw_twist[:, 1]), dim=-1
     )
-    total_scale = curve_scale * brake_scale
-    total_scale = torch.where(emergency, torch.zeros_like(total_scale), total_scale)
-    intervention_amount = (1.0 - total_scale).clamp(0.0, 1.0)
+    safe_wheels = _twist_to_feasible_wheels(
+        safe_twist_target,
+        wheel_radius,
+        wheel_base,
+        wheel_max_velocity,
+        wheel_radius_scale,
+    )
+    safe_wheels = torch.where(
+        finite_wheels.unsqueeze(-1), safe_wheels, torch.zeros_like(safe_wheels)
+    )
+    safe_twist = _wheel_velocities_to_twist(
+        safe_wheels, wheel_radius, wheel_base, wheel_radius_scale
+    )
+    intervention = enabled & forward_motion & (forward_scale < 1.0 - 1.0e-6)
 
     diagnostics = {
         "raw_twist": raw_twist,
-        "safe_twist": _wheel_velocities_to_twist(
-            safe_wheels, wheel_radius, wheel_base, safe_radius_scale
-        ),
-        "lateral_accel": lateral_accel,
-        "curve_scale": curve_scale,
-        "brake_scale": brake_scale,
-        "total_scale": total_scale,
-        "safe_speed": safe_speed,
-        "min_ttc": min_ttc,
-        "travel_clearance": travel_clearance,
-        "d_now_lower": d_now_lower,
-        "intervention_amount": intervention_amount,
-        "shield_intervened": intervention_amount > 1.0e-6,
-        "emergency_stopped": emergency,
+        "safe_twist": safe_twist,
+        "forward_speed_scale": forward_scale,
+        "forward_clearance": front_clearance,
+        "safe_speed": safe_twist[:, 0].abs(),
+        "shield_intervened": intervention,
+        "emergency_stopped": ~finite_wheels,
     }
     return safe_wheels, diagnostics

@@ -60,12 +60,12 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(c.level, 1)
 
     def test_level_bounds_and_failure_over_success(self):
-        c = self.make(initial_level=3)
+        c = self.make(initial_level=5)
         for _ in range(3):
             self.outcomes(c)
-        self.assertEqual(c.level, 3)
-        c.record([3]*20, [0]*20, [True]*20, [True]*20)
-        self.assertEqual(c.level, 2)
+        self.assertEqual(c.level, 5)
+        c.record([5]*20, [0]*20, [True]*20, [True]*20)
+        self.assertEqual(c.level, 4)
         self.assertEqual(c.last_success_rate, 0)
         low = self.make()
         for _ in range(3):
@@ -95,13 +95,13 @@ class CurriculumTests(unittest.TestCase):
         c.load_state_dict(self.make(initial_level=1).state_dict())
         c.advance()
         self.outcomes(c, 0, 10)
-        self.assertEqual((c.level, c.steps_since_change), (3, 0))
+        self.assertEqual((c.level, c.steps_since_change), (5, 0))
         unsupported = course.NavigationCurriculum(course.NavigationCurriculumCfg(), supported=False)
         self.assertFalse(unsupported.enabled)
 
     def test_invalid_configuration_and_state(self):
         for options in (dict(window_size=0), dict(required_windows=0), dict(min_level_steps=-1),
-                        dict(initial_level=4), dict(replay_probability=1),
+                        dict(initial_level=6), dict(replay_probability=1),
                         dict(promote_failure_rate=.5), dict(evaluation_noise_scale=float('nan')),
                         dict(noise_ranges=((0, 1),))):
             with self.assertRaises(ValueError):

@@ -165,9 +165,9 @@ class EmmaObsNavEnv(DirectRLEnv):
                 raise ValueError(
                     "random_obstacles num_obstacles must be positive"
                 )
-            if random_world_cfg.min_obstacle_spacing < 1.50:
+            if random_world_cfg.min_obstacle_spacing < 0.0:
                 raise ValueError(
-                    "random_obstacles edge spacing must be at least 1.50m"
+                    "random_obstacles edge spacing must be non-negative"
                 )
             if (
                 random_world_cfg.emma_spawn_clearance_radius
@@ -254,30 +254,12 @@ class EmmaObsNavEnv(DirectRLEnv):
             f"sync={self.cfg.sync_body_velocity_limits_to_wheels}"
         )
         safety_cfg = self.cfg.safety_control
-        max_reaction_time = (
-            safety_cfg.controller_latency_s
-            + safety_cfg.actuator_brake_build_up_s
-            + self.cfg.domain_rand.action_delay_max_steps * self.step_dt
-        )
-        vmax = self.cfg.max_linear_velocity
-        umax = safety_cfg.possible_obstacle_speed
-        max_aoi = safety_cfg.max_lidar_aoi_s
-        max_braking_boundary = (
-            safety_cfg.static_margin
-            + umax * max_aoi
-            + (vmax + umax) * max_reaction_time
-            + vmax * vmax / (2.0 * safety_cfg.braking_deceleration)
-            + umax * vmax / safety_cfg.braking_deceleration
-        )
-        max_slow_boundary = (
-            safety_cfg.static_margin
-            + umax * max_aoi
-            + (vmax + umax) * safety_cfg.ttc_slow_s
-        )
         print(
-            f"[Safety] vmax={vmax:.3f}m/s obstacle_speed={umax:.3f}m/s "
-            f"slow_start@vmax={max_slow_boundary:.3f}m "
-            f"braking_boundary@vmax={max_braking_boundary:.3f}m"
+            f"[Safety] forward_cone=+/-{safety_cfg.forward_half_angle_deg:.1f}deg "
+            f"stop_clearance={safety_cfg.stop_clearance:.3f}m "
+            f"full_speed_clearance={safety_cfg.full_speed_clearance:.3f}m "
+            f"min_forward_scale={safety_cfg.min_forward_speed_scale:.3f} "
+            f"max_lidar_aoi={safety_cfg.max_lidar_aoi_s:.3f}s"
         )
 
         # ---- Joint indices ----
@@ -379,18 +361,11 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._requested_body_twist_cmd = torch.zeros_like(self.actions)
         self._projected_body_twist_cmd = torch.zeros_like(self.actions)
         self._safe_body_twist_cmd = torch.zeros_like(self.actions)
-        self._safety_curve_scale = torch.ones(self.num_envs, device=self.device)
-        self._safety_brake_scale = torch.ones(self.num_envs, device=self.device)
-        self._safety_total_scale = torch.ones(self.num_envs, device=self.device)
-        self._safety_safe_speed = torch.zeros(self.num_envs, device=self.device)
-        self._safety_min_ttc = torch.full(
-            (self.num_envs,), float("inf"), device=self.device)
-        self._safety_travel_clearance = torch.full(
-            (self.num_envs,), self.cfg.lidar_max_distance, device=self.device)
-        self._safety_d_now_lower = torch.full(
-            (self.num_envs,), self.cfg.lidar_max_distance, device=self.device)
-        self._safety_intervention_amount = torch.zeros(
+        self._safety_forward_speed_scale = torch.ones(
             self.num_envs, device=self.device)
+        self._safety_safe_speed = torch.zeros(self.num_envs, device=self.device)
+        self._safety_forward_clearance = torch.full(
+            (self.num_envs,), self.cfg.lidar_max_distance, device=self.device)
         self._safety_intervened = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device)
         self._safety_emergency_stopped = torch.zeros(
@@ -1032,11 +1007,6 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._wheel_acceleration_scale[:n] = acceleration_scale
 
         safety_cfg = cfg.safety_control
-        reaction_time = (
-            safety_cfg.controller_latency_s
-            + safety_cfg.actuator_brake_build_up_s
-            + self._dr_action_delay[:n].to(dtype=raw_wheels.dtype) * self.step_dt
-        )
         wheel_targets, safety_diag = apply_safety_control(
             limited_wheels,
             self._shield_clearance[:n],
@@ -1044,15 +1014,11 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._shield_aoi[:n],
             wheel_radius=cfg.wheel_radius,
             wheel_base=cfg.wheel_base,
-            lateral_accel_limit=safety_cfg.lateral_accel_limit,
-            braking_deceleration=safety_cfg.braking_deceleration,
-            reaction_time_s=reaction_time,
-            static_margin=safety_cfg.static_margin,
-            possible_obstacle_speed=safety_cfg.possible_obstacle_speed,
+            wheel_max_velocity=cfg.wheel_max_velocity,
             forward_half_angle_deg=safety_cfg.forward_half_angle_deg,
-            rear_half_angle_deg=safety_cfg.rear_half_angle_deg,
-            ttc_slow_s=safety_cfg.ttc_slow_s,
-            ttc_stop_s=safety_cfg.ttc_stop_s,
+            stop_clearance=safety_cfg.stop_clearance,
+            full_speed_clearance=safety_cfg.full_speed_clearance,
+            min_forward_speed_scale=safety_cfg.min_forward_speed_scale,
             max_lidar_aoi_s=safety_cfg.max_lidar_aoi_s,
             wheel_radius_scale=self._dr_wheel_r_scale[:n],
             has_valid_scan=self._has_cached_scan[:n],
@@ -1078,14 +1044,9 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._dr_wheel_r_scale[:n],
         )
         self._safe_body_twist_cmd[:n] = safety_diag["safe_twist"]
-        self._safety_curve_scale[:n] = safety_diag["curve_scale"]
-        self._safety_brake_scale[:n] = safety_diag["brake_scale"]
-        self._safety_total_scale[:n] = safety_diag["total_scale"]
+        self._safety_forward_speed_scale[:n] = safety_diag["forward_speed_scale"]
         self._safety_safe_speed[:n] = safety_diag["safe_speed"]
-        self._safety_min_ttc[:n] = safety_diag["min_ttc"]
-        self._safety_travel_clearance[:n] = safety_diag["travel_clearance"]
-        self._safety_d_now_lower[:n] = safety_diag["d_now_lower"]
-        self._safety_intervention_amount[:n] = safety_diag["intervention_amount"]
+        self._safety_forward_clearance[:n] = safety_diag["forward_clearance"]
         self._safety_intervened[:n] = safety_diag["shield_intervened"]
         self._safety_emergency_stopped[:n] = safety_diag["emergency_stopped"]
 
@@ -1732,8 +1693,9 @@ class EmmaObsNavEnv(DirectRLEnv):
             log["Safety/emergency_stop_rate"] = (
                 self._safety_emergency_stopped.float().mean()
             )
-            log["Safety/curve_scale_mean"] = self._safety_curve_scale.mean()
-            log["Safety/brake_scale_mean"] = self._safety_brake_scale.mean()
+            log["Safety/forward_speed_scale_mean"] = (
+                self._safety_forward_speed_scale.mean()
+            )
             log["Safety/safe_speed_mean"] = self._safety_safe_speed.mean()
             log["Control/wheel_projection_scale_mean"] = (
                 self._wheel_projection_scale.mean()
@@ -1753,18 +1715,9 @@ class EmmaObsNavEnv(DirectRLEnv):
             log["Episode/rate_window_size"] = len(
                 self._termination_reason_window
             )
-            log["Safety/travel_clearance_mean"] = (
-                self._safety_travel_clearance.mean()
+            log["Safety/forward_clearance_mean"] = (
+                self._safety_forward_clearance.mean()
             )
-            log["Safety/effective_clearance_mean"] = (
-                self._safety_d_now_lower.mean()
-            )
-            finite_ttc = torch.where(
-                torch.isfinite(self._safety_min_ttc),
-                self._safety_min_ttc,
-                torch.full_like(self._safety_min_ttc, self.cfg.safety_control.ttc_slow_s * 2.0),
-            )
-            log["Safety/min_ttc_mean"] = finite_ttc.mean()
             for name, term in self._reward_terms.items():
                 log[f"Reward/{name}_mean"] = term.mean()
             log["Reward/total_mean"] = nav_sum.mean()
@@ -2117,14 +2070,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._requested_body_twist_cmd[env_ids] = 0.0
         self._projected_body_twist_cmd[env_ids] = 0.0
         self._safe_body_twist_cmd[env_ids] = 0.0
-        self._safety_curve_scale[env_ids] = 1.0
-        self._safety_brake_scale[env_ids] = 1.0
-        self._safety_total_scale[env_ids] = 1.0
+        self._safety_forward_speed_scale[env_ids] = 1.0
         self._safety_safe_speed[env_ids] = 0.0
-        self._safety_min_ttc[env_ids] = float("inf")
-        self._safety_travel_clearance[env_ids] = self.cfg.lidar_max_distance
-        self._safety_d_now_lower[env_ids] = self.cfg.lidar_max_distance
-        self._safety_intervention_amount[env_ids] = 0.0
+        self._safety_forward_clearance[env_ids] = self.cfg.lidar_max_distance
         self._safety_intervened[env_ids] = False
         self._safety_emergency_stopped[env_ids] = False
         self._collision_mask[env_ids] = False

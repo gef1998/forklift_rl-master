@@ -67,27 +67,19 @@ class DomainRandCfg:
 
 @dataclass
 class SafetyControlCfg:
-    """Always-on runtime safety projection parameters.
+    """Simple forward-clearance speed governor.
 
-    Defaults target the current static-obstacle training world. Dynamic people
-    must use a separate non-zero obstacle-speed bound after their geometry and
-    timestamps are represented in the shield observation.
+    Clearance is measured outside the rectangular robot footprint. Only
+    positive linear velocity is scaled; angular and reverse commands remain
+    available so the policy can turn away from a wall.
     """
 
-    # Experimental ablation only. Keep True for deployment and safety runs.
-    # False bypasses S1/S2/S3, but wheel feasibility projection remains active.
-    enabled: bool = False
-    lateral_accel_limit: float = 0.8          # m/s², simultaneous v/omega limit
-    braking_deceleration: float = 1.0         # m/s² usable guaranteed deceleration
-    controller_latency_s: float = 0.06        # shield compute/transport latency
-    actuator_brake_build_up_s: float = 0.10   # command-to-effective-braking latency
-    static_margin: float = 0.30               # extra clearance outside robot footprint
-    possible_obstacle_speed: float = 0.0      # current ObsNav obstacles are static
-    forward_half_angle_deg: float = 45.0
-    rear_half_angle_deg: float = 45.0
-    ttc_slow_s: float = 1.5
-    ttc_stop_s: float = 0.4
-    max_lidar_aoi_s: float = 0.20             # fail closed when last scan is older
+    enabled: bool = True
+    forward_half_angle_deg: float = 30.0
+    stop_clearance: float = 0.3
+    full_speed_clearance: float = 0.9
+    min_forward_speed_scale: float = 0.2
+    max_lidar_aoi_s: float = 0.30
 
 # ---- Asset paths ----
 _EMMA_USD = resolve_asset("Emma_no_ground.usd", override_env="EMMA_USD_PATH")
@@ -95,7 +87,7 @@ _EMMA_USD = resolve_asset("Emma_no_ground.usd", override_env="EMMA_USD_PATH")
 
 @configclass
 class EmmaObsNavEnvCfg(DirectRLEnvCfg):
-    """Emma AMR 二轮差速避障导航 — 四级自适应任务与噪声课程。"""
+    """Emma AMR 二轮差速避障导航 — 六级自适应任务与噪声课程。"""
 
     # ---- Environment ----
     decimation = 2
@@ -152,10 +144,10 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     #   运动学 (二轮差速):
     #     v_lin  = (ω_L + ω_R) / 2 × wheel_radius
     #     v_ang  = (ω_R - ω_L) / wheel_base × wheel_radius
-    #     wheel_radius = 0.05 m  (当前 USD 标称值，待实车底盘参数复核)
+    #     wheel_radius = 0.07 m  (当前 USD 标称值)
     #     wheel_base   = 0.43 m  (左右驱动轮横向中心距，不是 0.52 m 车体总宽)
     # ====================================================================
-    wheel_radius: float = 0.05             # m
+    wheel_radius: float = 0.07            # m
     wheel_base: float = 0.43               # m，实际语义为 track width
     wheel_max_velocity: float = 20.0       # rad/s
     # Effective material pairs use min on both sides: drive 0.8/0.6,
@@ -186,11 +178,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Implicit velocity drive: reported wheel speed can differ from joint angle
     # increments. Do not infer actual motor torque from damping * error.
     wheel_velocity_damping: float = 200.0
-    wheel_effort_limit: float = 4.15
+    wheel_effort_limit: float = 6.0
     # Reflected wheel-joint inertia. Joint-response sweeps showed that
-    # 0.015 kg*m^2 lets TGS 4/2 reproduce the measured actuator lag while
-    # improving the paired 64-env throughput over the 8/4 configuration.
-    wheel_armature: float = 0.015
+    # 0.03 kg*m^2 lets TGS 4/2 reproduce the measured actuator lag after the
+    # drive-wheel radius was increased to 0.07 m.
+    wheel_armature: float = 0.03
 
     # Nominal command slew limits; safety braking retains priority.
     # Substeps interpolate commands. These are not hard bounds on measured
@@ -212,8 +204,8 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     max_angular_velocity: float = 1.5
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
-    robot_half_length: float = 0.42        # 0.4115m physical half-length + safety margin
-    robot_half_width: float = 0.267        # 532mm / 2
+    robot_half_length: float = 0.425        # 0.4115m physical half-length + safety margin
+    robot_half_width: float = 0.275        # 532mm / 2
     robot_height: float = 0.253            # 车身高度
 
     robot_cfg: ArticulationCfg = ArticulationCfg(
@@ -222,9 +214,8 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
             usd_path=_EMMA_USD,
             articulation_props=sim_utils.ArticulationRootPropertiesCfg(
                 enabled_self_collisions=True,
-                # Armature 0.015 conditions the wheel/contact response enough
-                # for the 4/2 budget. See the six-profile validation and the
-                # high-speed transient boundary in the drive report.
+                # Armature 0.03 conditions the 0.07 m wheel/contact response
+                # for the 4/2 budget. See the six-profile drive validation.
                 solver_position_iteration_count=4,
                 solver_velocity_iteration_count=2,
             ),
@@ -267,25 +258,26 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     goal_spawn_half: float = 2.0            # 目标点生成范围 ±2m
 
     # ====================================================================
-    # Random-obstacle world（三级几何任务，加一级噪声鲁棒性课程）
+    # Random-obstacle world（六级任务与噪声课程）
     #   同一生成分布：随机连通内墙图 + 随机回环 + 圆柱/方柱散障。
     #   自然组合 S 型、回型和直行绕障，不切换固定场景模板。
-    #   散障间净距 >= 1.5 m；起终点位于膨胀后的同一连通域。
-    #   课程：1.5~3 m 直达 → 3~5.2 m 优先绕障 → 完整任务 > 5.2 m。
+    #   散障间净距 >= 0.6 m；起终点位于膨胀后的同一连通域。
+    #   课程：短距直达 → 中距绕障 → 长距 → 长距强噪声
+    #         → 静态密集区长距 → 静态超密集区长距。
     #   每个并行环境初始化独立地图，reset 从该地图的安全点对库采样。
     # ====================================================================
     random_obstacle_world: RandomObstacleWorldConfig = RandomObstacleWorldConfig(
         arena_size=10.0,
         wall_thickness=0.15,
         wall_height=1.0,
-        num_obstacles=15,
+        num_obstacles=20,
         radius_min=0.20,
-        radius_max=0.50,
+        radius_max=0.40,
         cube_size_min=0.30,
-        cube_size_max=0.50,
+        cube_size_max=0.45,
         obstacle_height_min=1.0,
         obstacle_height_max=1.2,
-        min_obstacle_spacing=1.50,
+        min_obstacle_spacing=0.60,
         obstacle_wall_clearance=0.30,
         emma_spawn_clearance_radius=0.70,
         goal_spawn_clearance_radius=0.50,
@@ -293,14 +285,23 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         obstacle_candidate_count=32,
         spawn_candidate_count=96,
         structured_layout=True,       # False 可恢复旧的纯散障生成器
-        grid_size=3,                  # 3×3 通道图，12 个可隐藏的内墙槽位
+        grid_size=3,                  # 3×3 通道图，12 个整墙槽位 + 4 个窄门短墙槽位
         interior_wall_thickness=0.15,
         wall_jitter=0.20,              # 内墙法向独立扰动，单位 m
-        loop_probability_range=(0.0, 0.65),
-        clutter_density_range=(0.35, 1.0),  # num_obstacles 为容量上限
-        navigation_clearance=0.60,     # 车身半对角线 + 通行余量
+        loop_probability_range=(0.0, 0.40),
+        clutter_density_range=(0.65, 0.90),  # 高密度静态散障；连通性仍逐图验证
+        navigation_clearance=0.52,     # 覆盖当前车身半对角线与碰撞余量
         connectivity_grid_resolution=0.15,
         spawn_bank_size=128,
+        max_layout_attempts=64,
+        # 在同一随机墙图中把部分关键开边收窄；不是切换固定场景模板。
+        narrow_passage_probability=0.85,
+        narrow_passage_width_range=(1.20, 1.50),
+        max_narrow_passages=2,
+        narrow_pair_fraction=0.50,    # 含关键窄门地图的长任务中，50% 强制跨门
+        dense_clutter_influence_radius=1.25,  # 第五级优先选择散障密集区路线
+        ultra_dense_clutter_influence_radius=0.70,  # 第六级聚焦更局部的拥挤路线
+        min_connected_free_fraction=0.60,  # 所有课程端点仍位于最大连通域
     )
 
     # ====================================================================
@@ -453,18 +454,17 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # 有正负的目标进度、近障、动作变化、时间、到达和失败。
     goal_reach_bonus: float = 25.0
     nav_failure_penalty: float = -30.0  # collision, fall or leaving the arena
-    collision_clearance_threshold: float = 0.05
+    collision_clearance_threshold: float = 0.01
     fall_reset_height: float = -0.25
 
     # Signed change in actual goal distance; reward units per metre.
     # Moving away is negative, revisiting the same distance cannot repeatedly
     # collect the old positive-only progress reward (undiscounted transitions).
     nav_progress_per_meter: float = 5.0
-
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.3
+    nav_clearance_threshold: float = 0.05
     nav_proximity_cost_per_second: float = 0.25
     nav_time_cost_per_second: float = 0.75
 

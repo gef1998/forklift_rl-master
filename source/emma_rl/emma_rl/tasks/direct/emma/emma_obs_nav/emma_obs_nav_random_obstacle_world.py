@@ -59,19 +59,42 @@ class RandomObstacleWorldConfig:
     wall_jitter: float = 0.20
     loop_probability_range: tuple[float, float] = (0.0, 0.65)
     clutter_density_range: tuple[float, float] = (0.35, 1.0)
-    navigation_clearance: float = 0.60
+    navigation_clearance: float = 0.52
     connectivity_grid_resolution: float = 0.15
     spawn_bank_size: int = 128
+    max_layout_attempts: int = 64
     curriculum_distance_ranges: tuple = ((1.5, 3.0), (3.0, 5.2))
     spawn_heading_half_angles_deg: tuple = (30.0, 90.0, 180.0)
+    narrow_passage_probability: float = 0.85
+    narrow_passage_width_range: tuple[float, float] = (1.20, 1.50)
+    max_narrow_passages: int = 2
+    narrow_pair_fraction: float = 0.50
+    dense_clutter_influence_radius: float = 1.25
+    ultra_dense_clutter_influence_radius: float = 0.70
+    min_connected_free_fraction: float = 0.60
+
+    @property
+    def num_graph_wall_slots(self) -> int:
+        return 2 * self.grid_size * (self.grid_size - 1) if self.structured_layout else 0
 
     @property
     def num_wall_slots(self) -> int:
-        return 2 * self.grid_size * (self.grid_size - 1) if self.structured_layout else 0
+        if not self.structured_layout:
+            return 0
+        return self.num_graph_wall_slots + 2 * self.max_narrow_passages
 
     @property
     def interior_wall_length(self) -> float:
         return (self.arena_size - 2 * self.wall_thickness) / self.grid_size
+
+    @property
+    def narrow_gate_wall_length(self) -> float:
+        return (self.interior_wall_length - self.narrow_passage_width_range[1]) / 2
+
+    @property
+    def wall_slot_lengths(self) -> tuple[float, ...]:
+        return ((self.interior_wall_length,) * self.num_graph_wall_slots
+                + (self.narrow_gate_wall_length,) * (2 * self.max_narrow_passages))
 
     _obstacle_types: list[str] = field(default_factory=list)
     _obstacle_radii: list[float] = field(default_factory=list)
@@ -112,9 +135,9 @@ def spawn_random_obstacle_world(cfg: RandomObstacleWorldConfig) -> None:
         wall_cfg.func(path, wall_cfg, translation=(cx, cy, cfg.wall_height / 2.0))
         _ensure_collision_api(path)
 
-    for index in range(cfg.num_wall_slots):
+    for index, wall_length in enumerate(cfg.wall_slot_lengths):
         wall_cfg = sim_utils.CuboidCfg(
-            size=(cfg.interior_wall_length, cfg.interior_wall_thickness, cfg.wall_height),
+            size=(wall_length, cfg.interior_wall_thickness, cfg.wall_height),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=True, kinematic_enabled=True
             ),
@@ -232,8 +255,18 @@ class RandomObstacleWorldManager:
                 emma_clearance=cfg.emma_spawn_clearance_radius,
                 goal_clearance=cfg.goal_spawn_clearance_radius,
                 min_goal_distance=cfg.goal_min_distance, spawn_bank_size=cfg.spawn_bank_size,
+                max_layout_attempts=cfg.max_layout_attempts,
                 include_curriculum_banks=True,
                 curriculum_distance_ranges=cfg.curriculum_distance_ranges,
+                narrow_passage_probability=cfg.narrow_passage_probability,
+                narrow_passage_width_range=cfg.narrow_passage_width_range,
+                max_narrow_passages=cfg.max_narrow_passages,
+                narrow_pair_fraction=cfg.narrow_pair_fraction,
+                dense_clutter_influence_radius=cfg.dense_clutter_influence_radius,
+                ultra_dense_clutter_influence_radius=(
+                    cfg.ultra_dense_clutter_influence_radius
+                ),
+                min_connected_free_fraction=cfg.min_connected_free_fraction,
             ) for seed in seeds]
             for name in ("positions", "active", "wall_poses", "wall_active"):
                 target = getattr(self, name)
@@ -318,12 +351,14 @@ class RandomObstacleWorldManager:
             choice = torch.randint(self.cfg.spawn_bank_size, (env_ids.numel(),), device=self.device)
             if task_levels is None:
                 task_levels = torch.full_like(env_ids, 2)
-            # Levels 2 and 3 share full geometry; level 3 adds stronger noise.
-            geometry_levels = task_levels.clamp(max=2)
-            pairs = self.curriculum_spawn_pairs[env_ids, geometry_levels, choice]
+            # Levels 2 and 3 share the original long-range bank; levels 4 and
+            # 5 use increasingly local static-clutter density rankings.
+            bank_levels = task_levels.clamp(max=5)
+            pairs = self.curriculum_spawn_pairs[env_ids, bank_levels, choice]
             emma, goal = pairs[:, 0], pairs[:, 1]
+            heading_levels = task_levels.clamp(max=2)
             heading_half = torch.tensor(self.cfg.spawn_heading_half_angles_deg,
-                                        device=self.device)[geometry_levels] * (math.pi / 180)
+                                        device=self.device)[heading_levels] * (math.pi / 180)
             direction = torch.atan2(goal[:, 1] - emma[:, 1], goal[:, 0] - emma[:, 0])
             yaw = direction + (2 * torch.rand(env_ids.numel(), device=self.device) - 1) * heading_half
             yaw = torch.remainder(yaw, 2 * math.pi)
@@ -367,7 +402,7 @@ class RandomObstacleWorldManager:
                 if not self.wall_active[env_index, index].item():
                     continue
                 x, y, yaw = self.wall_poses[env_index, index].cpu().tolist()
-                wall = trimesh.creation.box(extents=[self.cfg.interior_wall_length,
+                wall = trimesh.creation.box(extents=[self.cfg.wall_slot_lengths[index],
                                                     self.cfg.interior_wall_thickness,
                                                     self.cfg.wall_height])
                 wall.apply_transform(trimesh.transformations.rotation_matrix(yaw, [0, 0, 1]))

@@ -4,12 +4,12 @@
 
 ## 已落地的修改
 
-- `drive_contacts.py`：在场景复制前，给驱动轮增加半径 0.05 m 的球面碰撞代理，给脚轮增加半径 0.0395 m 的圆柱碰撞代理；关闭原形状的碰撞。原有可见圆柱、刚体质量/惯量、关节和二进制 USD 均保留。
+- `drive_contacts.py`：在场景复制前，读取 USD 驱动轮半径（当前 0.07 m）并创建同半径球面碰撞代理，给脚轮增加半径 0.0395 m 的圆柱碰撞代理；关闭原形状的碰撞。原有可见圆柱、刚体质量/惯量和关节均保留。
 - 通过 `PhysxSceneAPI` 开启 `enableExternalForcesEveryIteration`。这是与接触代理一起验证的组合；单独在旧几何上开启曾经恶化转向。
-- 保持 damping=200、7 DOF；每轮 `effort_limit_sim` 默认改为 4.15 N·m。最终 TGS 求解器采用 **4/2**，驱动轮关节使用 `armature=0.015`，在接近实车响应的同时降低训练成本。
+- 保持 damping=200、7 DOF；TGS 求解器采用 **4/2**。轮径改为 0.07 m 后，每轮 `effort_limit_sim=6.0 N·m`、`armature=0.03`，在接近实车响应的同时降低训练成本。
 - `action_control.py`：在两个轮速之间共同插值，使名义 body twist 的变化满足线/角加速度约束，同时保持轮速和车体速度的可行范围。覆盖启动、减速和反转。
-- `emma_obs_nav_env.py`：在安全盾之前限制名义指令，在两个物理子步间插值下发；安全盾干预时直接采用安全目标，避免插回旧高速命令。新指令状态在按环境重置时清零。
-- `safety_control.py`：修复运行既有测试时发现的问题——行进方向没有任何 LiDAR 射线时，空集合不能被当作无穷远畅通。仅前向 LiDAR 的倒车请求现在会触发停车。
+- `emma_obs_nav_env.py`：先限制名义指令并低通，再经过加速度限制和前向净空限速；安全模块干预时直接采用安全目标。新指令状态在按环境重置时清零。
+- `safety_control.py`：旧 S1/S2/S3 投影已弃用。新模块取前方 `±30°` 的最小轮廓净空，只缩放正向线速度，保留角速度、倒车和原地转向。
 - 清理已被实验否定的配置注释，区分外加 effort 输入、PD 估算力矩和真实隐式驱动输出；修正材质合成优先级的说明。
 
 当前配置：
@@ -20,9 +20,10 @@ caster_collision_radius = 0.0395
 drive_enable_external_forces_every_iteration = True
 solver_position_iteration_count = 4
 solver_velocity_iteration_count = 2
-wheel_armature = 0.015
+wheel_radius = 0.07
+wheel_armature = 0.03
 wheel_velocity_damping = 200.0
-wheel_effort_limit = 4.15
+wheel_effort_limit = 6.0
 enable_motion_acceleration_limits = True
 enable_motion_command_low_pass = True
 motion_command_low_pass_tau_s = 0.06
@@ -32,7 +33,14 @@ linear_acceleration_command_scale = 0.90
 angular_acceleration_command_scale = 0.94
 ```
 
-当前正常下发指令使用 0.90 m/s²、1.41 rad/s²。名义轮速命令在可行域投影之后、加速度限制之前增加精确离散的一阶低通：`alpha = 1-exp(-dt/tau)`；`tau=0.06 s` 在 50 Hz 下对应 `alpha≈0.283`。安全制动位于低通和斜率限制之后，不受平滑延迟。
+当前正常下发指令使用 0.90 m/s²、1.41 rad/s²。名义轮速命令在可行域投影之后、加速度限制之前增加精确离散的一阶低通：`alpha = 1-exp(-dt/tau)`；`tau=0.06 s` 在 50 Hz 下对应 `alpha≈0.283`。前向净空限速位于低通和斜率限制之后。
+
+2026-09-21 将左右驱动轮 USD 半径从 0.05 m 改为 0.07 m，并把轮心及对应关节锚点 Z 从 0.005 m 提到 0.025 m，使轮底接触高度继续保持 -0.045 m；横向轮距不变。0.9 m/s² 时，150 kg 车体的理想单轮扭矩约为 `150×0.9×0.07/2=4.725 N·m`，原 4.15 N·m 上限会饱和。最终采用 6.0 N·m 与 `armature=0.03`。完整六工况标定结果位于 `logs/action_calibration/2026-09-21_wheel_radius_007_final/`：车体线速度延迟 50~55 ms、RMSE 0.00093~0.00141 m/s；角速度延迟均为 75 ms、RMSE 0.00479~0.00757 rad/s。
+
+前向净空规则为 `x=clamp((d-0.30)/(0.90-0.30),0,1)`、
+`scale=0.20+0.80*x²(3-2x)`、`vx_safe=scale*vx`。其中 `d` 是车体前方 `±30°`
+内已扣除车体轮廓的最小 clearance。`d≤0.30 m` 时保留 20% 正向速度，
+`d≥0.90 m` 时不限速；角速度不缩放。安全扫描缺失或 AoI 超过 `0.30 s` 时仍禁止正向线速度。
 
 ## 结论与证据
 
@@ -212,9 +220,9 @@ damping（100/200）、effort（4.0/4.15）和地面摩擦系数（0.5→1.2）�
 已通过：
 
 - 动作映射和加速度约束测试 10 项；包括反转、轮半径缩放、可行范围、无变化指令和非法配置。
-- 安全盾测试 11 项，包括无后向射线时倒车停车。
+- 前向净空限速测试 8 项，覆盖阈值、单调性、角速度保留、倒车、缺失/过期扫描和禁用模式。
 - 四环境首尾碰撞代理复制、可见形状保留、名义指令变化率检查。
-- 安全盾停车不被插值延迟；只清零被重置环境的命令缓冲。
+- 安全限速干预不被子步插值拉回旧指令；只清零被重置环境的命令缓冲。
 
 转向最终校准（角指令系数 0.94）：
 
@@ -302,13 +310,13 @@ damping（100/200）、effort（4.0/4.15）和地面摩擦系数（0.5→1.2）�
 - 此次验证的是无障碍、固定质量、整定后的启动和反转；没有证明碰撞、急停、不同载荷/地面或所有随机状态下都严格满足物理加速度上限。安全盾制动优先于正常指令平滑。
 - 接触代理导致驱动轮承担几乎全部重量。真机支撑预载、轮胎接触形状和万向脚轮结构仍需核实。不要把这套尺寸无条件移植到别的车。
 - 球面代理、0.5 mm 支撑高度差和逐迭代外力是组合验证的结果。不要只开启其中一个开关并认为会得到同样效果。
-- `solver_position_iteration_count = 32` 的配对实测吞吐比 8 低约 20.6%。当前默认为 4/2 + `wheel_armature=0.015`，获得 50/70 ms 的线/角速度延迟，并比 8/4 + 0.005 的相邻 64 环境基准快约 8.3%。若实车摆动或碰撞回归暴露数值瞬态问题，优先回退到 8/4 + 0.005。
+- `solver_position_iteration_count = 32` 的配对实测吞吐比 8 低约 20.6%。当前 0.07 m 轮径配置默认为 4/2 + `wheel_armature=0.03`，获得 50~55/75 ms 的线/角速度延迟。若实车摆动或碰撞回归暴露数值瞬态问题，应重新标定 8/4 回退参数，不能直接套用 0.05 m 轮径下的 0.005。
 - 角速度轴"左比右慢 5~25 ms"在 8/4 和 32/4 下都存在，资产里找不到对应几何差异，尚未定位。线速度轴没有这个问题，所以直线任务的标定不受影响。
 - 左轮 `physics:localRot1` 的非单位四元数当前不影响动力学（虚部为零 → 单位阵），但不要把它当作"已被验证的写法"照搬；正常写法是 `(1, 0, 0, 0)`。
 - `base_link` 的 150 kg 与全部轮/脚轮/举升质量都是 `assets/Emma_no_ground.usd` 手写的，CAD 引用只有 14.95 kg 的 `base_link`。改动它等于同时改动力矩预算和整定结论。现有扫描只排除了全部质量与惯量等比例缩放及标称工况力矩饱和，尚未排除质量比和关节等效惯量。
-- 0.3~0.9 m/s² 的斜坡在标称质量下并未触及 4.15 N·m 力矩上限；只有接近 818 kg 或逼近 1.0 m/s² 规格时才会饱和，届时跟踪会崩而不是单纯变慢。
+- 0.07 m 轮径下，0.9 m/s² 斜坡的理想单轮扭矩已约 4.725 N·m；原 4.15 N·m 上限会饱和。当前 6.0 N·m 上限已通过 0.3/0.6/0.9 m/s² 标定，但载荷或加速度继续提高时仍需重新核算。
 - 原有策略 checkpoint 可以用于观察，但动作动态已改变，不能假定旧策略的表现保持不变；此次没有启动训练或替换 checkpoint。
-- 保留原二进制 USD，碰撞修改由 Python 配置持久化，在每次任务创建时构建。需要回到旧接触模型时，设置 `drive_wheel_collision_shape="cylinder"`、`caster_collision_radius=None`、`drive_enable_external_forces_every_iteration=False`；是否关闭加速度限制由复现目的决定。
+- 当前 `assets/Emma_no_ground.usd` 已持久化 0.07 m 驱动轮半径及相应轮心/关节锚点高度；运行时球面碰撞代理从该 USD 自动读取半径。修改前资产备份为 `/tmp/Emma_no_ground_before_radius_007.usd`。需要回到旧接触模型时，设置 `drive_wheel_collision_shape="cylinder"`、`caster_collision_radius=None`、`drive_enable_external_forces_every_iteration=False`；是否关闭加速度限制由复现目的决定。
 - 完整修改前备份位于 `/home/jz/cqz/emma-drive-backup-20260911-0CFUYw/`。备份包含用户原有未提交改动；不要用 `git reset --hard` 回退它们。
 
 可复用的排查流程和反例见 [PhysX 驱动接触经验](lessons/physx_drive_contacts.md)。

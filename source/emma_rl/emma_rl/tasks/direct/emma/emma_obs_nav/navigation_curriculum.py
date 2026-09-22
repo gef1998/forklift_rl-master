@@ -7,10 +7,20 @@ import math
 class NavigationCurriculumCfg:
     enabled: bool = True
     initial_level: int = 0
-    evaluation_level: int = 3
+    evaluation_level: int = 5
     evaluation_noise_scale: float = 0.0
     replay_probability: float = 0.20
-    noise_ranges: tuple = ((0.0, 0.05), (0.05, 0.15), (0.10, 0.35), (0.35, 1.0))
+    # Levels 4 and 5 keep the hardest noise range and select routes through
+    # progressively denser static-clutter regions. Keeping the noise envelope
+    # unchanged isolates the geometric challenge.
+    noise_ranges: tuple = (
+        (0.0, 0.05),
+        (0.05, 0.15),
+        (0.10, 0.35),
+        (0.35, 1.0),
+        (0.35, 1.0),
+        (0.35, 1.0),
+    )
     window_size: int = 512
     required_windows: int = 2
     min_level_steps: int = 2000
@@ -31,8 +41,11 @@ class NavigationCurriculum:
     def __init__(self, cfg: NavigationCurriculumCfg, *, supported: bool = True):
         self.cfg = cfg
         self.enabled = cfg.enabled and supported
-        if cfg.initial_level not in (0, 1, 2, 3) or cfg.evaluation_level not in (0, 1, 2, 3):
-            raise ValueError("curriculum levels must be 0, 1, 2, or 3")
+        self.num_levels = len(cfg.noise_ranges)
+        if self.num_levels != 6:
+            raise ValueError("six curriculum noise ranges are required")
+        if not 0 <= cfg.initial_level < self.num_levels or not 0 <= cfg.evaluation_level < self.num_levels:
+            raise ValueError("curriculum levels must be between 0 and 5")
         for name in ("window_size", "required_windows", "min_level_steps"):
             value = getattr(cfg, name)
             if not isinstance(value, int) or value < (0 if name == "min_level_steps" else 1):
@@ -44,14 +57,14 @@ class NavigationCurriculum:
         if (cfg.demote_success_rate >= cfg.promote_success_rate
                 or cfg.promote_failure_rate >= cfg.demote_failure_rate):
             raise ValueError("curriculum thresholds must provide hysteresis")
-        if len(cfg.noise_ranges) != 4 or any(
+        if any(
             len(r) != 2 or not 0 <= r[0] <= r[1] <= 1 for r in cfg.noise_ranges
         ):
-            raise ValueError("four valid noise ranges are required")
+            raise ValueError("six valid noise ranges are required")
         if cfg.replay_probability >= 1:
             raise ValueError("replay_probability must leave some current-level tasks")
         if any(cfg.noise_ranges[i][j] > cfg.noise_ranges[i + 1][j]
-               for i in range(3) for j in range(2)):
+               for i in range(self.num_levels - 1) for j in range(2)):
             raise ValueError("noise ranges must increase with curriculum level")
         self.level = cfg.initial_level if self.enabled else cfg.evaluation_level
         self.generation = 0
@@ -87,7 +100,7 @@ class NavigationCurriculum:
             self.demote_streak = self.demote_streak + 1 if demote else 0
             next_level = self.level
             if self.promote_streak >= self.cfg.required_windows:
-                next_level = min(3, self.level + 1)
+                next_level = min(self.num_levels - 1, self.level + 1)
             elif self.demote_streak >= self.cfg.required_windows:
                 next_level = max(0, self.level - 1)
             if next_level != self.level:
@@ -109,7 +122,9 @@ class NavigationCurriculum:
     def load_state_dict(self, state):
         if not self.enabled:
             return  # Evaluation stays at its explicitly configured level.
-        if state.get("version") != 1 or state.get("level") not in (0, 1, 2, 3):
+        if (state.get("version") != 1
+                or not isinstance(state.get("level"), int)
+                or not 0 <= state["level"] < self.num_levels):
             raise ValueError("unsupported curriculum checkpoint")
         for name in ("generation", "steps_since_change", "promote_streak", "demote_streak"):
             if not isinstance(state.get(name), int) or state[name] < 0:

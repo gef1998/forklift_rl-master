@@ -40,17 +40,17 @@ class StructuredLayoutTests(unittest.TestCase):
             np.fill_diagonal(edge, np.inf)
             self.assertTrue((edge >= 1.5 - 1e-6).all())
             wall_clear = geometry.point_clearance(p, p, RADII, np.zeros_like(active),
-                layout["wall_poses"], layout["wall_active"], pitch, .15, 4.85)
+                layout["wall_poses"], layout["wall_active"], layout["wall_lengths"], .15, 4.85)
             self.assertTrue((wall_clear[active] >= r + .30 - 1e-6).all())
             pairs = layout["spawn_pairs"]
             clear = geometry.point_clearance(pairs, p, RADII, active,
-                layout["wall_poses"], layout["wall_active"], pitch, .15, 4.85)
+                layout["wall_poses"], layout["wall_active"], layout["wall_lengths"], .15, 4.85)
             self.assertTrue((clear[:, 0] >= .70).all())
             self.assertTrue((clear[:, 1] >= .60).all())
             self.assertTrue((np.linalg.norm(pairs[:, 0] - pairs[:, 1], axis=-1) > 5.2).all())
             grid_clear = geometry.point_clearance(points, p, RADII, active,
-                layout["wall_poses"], layout["wall_active"], pitch, .15, 4.85)
-            free = grid_clear >= .60 + step / math.sqrt(2)
+                layout["wall_poses"], layout["wall_active"], layout["wall_lengths"], .15, 4.85)
+            free = grid_clear >= layout["navigation_clearance"] + step / math.sqrt(2)
             # Independent propagation from the first spawn verifies every bank
             # endpoint is reachable, without calling the generator's flood fill.
             indices = np.rint((pairs[..., ::-1] + 4.85) / step).astype(int)
@@ -81,12 +81,13 @@ class StructuredLayoutTests(unittest.TestCase):
             straight |= any({(r * 3, r * 3 + 1), (r * 3 + 1, r * 3 + 2)} <= edges for r in range(3))
             pairs = layout["spawn_pairs"]
             lines = pairs[:, :1] + (pairs[:, 1:] - pairs[:, :1]) * np.linspace(0, 1, 65)[None, :, None]
-            args = (layout["wall_poses"], layout["wall_active"], 9.7 / 3, .15, 4.85)
+            args = (layout["wall_poses"], layout["wall_active"], layout["wall_lengths"], .15, 4.85)
             wall_clear = geometry.point_clearance(lines, layout["positions"], RADII,
                                                    np.zeros(15, dtype=bool), *args).min(axis=1)
             all_clear = geometry.point_clearance(lines, layout["positions"], RADII,
                                                   layout["active"], *args).min(axis=1)
-            detour |= bool(((wall_clear >= .60) & (all_clear < .50)).any())
+            detour |= bool(((wall_clear >= layout["navigation_clearance"])
+                            & (all_clear < layout["navigation_clearance"])).any())
             neighbours = [[] for _ in range(9)]
             for a, b in edges:
                 neighbours[a].append(b)
@@ -110,11 +111,27 @@ class StructuredLayoutTests(unittest.TestCase):
         self.assertTrue(straight, "missing straight connected runs")
         self.assertTrue(detour, "missing clutter obstructing otherwise straight routes")
 
+    def test_narrow_passages_are_part_of_the_random_distribution(self):
+        layouts_with_gates = [x for x in self.layouts if len(x["narrow_gate_widths"])]
+        self.assertGreater(len(layouts_with_gates), 32)
+        forced_pair_count = 0
+        for layout in layouts_with_gates:
+            self.assertLessEqual(len(layout["narrow_gate_widths"]), 2)
+            self.assertTrue(((layout["narrow_gate_widths"] >= 1.20)
+                             & (layout["narrow_gate_widths"] <= 1.50)).all())
+            # Each gate is represented by exactly two short wall slots.
+            self.assertGreaterEqual(layout["wall_active"].sum(),
+                                    2 * len(layout["narrow_gate_widths"]))
+            self.assertEqual(layout["narrow_pair_mask"].shape, (128,))
+            forced_pair_count += layout["narrow_pair_mask"].sum()
+        self.assertGreater(forced_pair_count, 128 * len(self.layouts) * .15)
+
     def test_empty_clutter_and_invalid_geometry(self):
         layout = geometry.sample_connected_layout([], seed=4)
         self.assertEqual(layout["positions"].shape, (0, 2))
         for options in ({"grid_size": 0}, {"grid_size": 8}, {"grid_resolution": 0},
-                        {"min_goal_distance": 30}, {"loop_probability_range": (-1, 1)}):
+                        {"min_goal_distance": 30}, {"loop_probability_range": (-1, 1)},
+                        {"narrow_passage_width_range": (1.0, 4.0)}):
             with self.assertRaises(ValueError):
                 geometry.sample_connected_layout(RADII, seed=1, **options)
 
