@@ -78,7 +78,7 @@ class SafetyControlCfg:
     forward_half_angle_deg: float = 30.0
     stop_clearance: float = 0.3
     full_speed_clearance: float = 0.9
-    min_forward_speed_scale: float = 0.2
+    min_forward_speed_scale: float = 0.5
     max_lidar_aoi_s: float = 0.30
 
 # ---- Asset paths ----
@@ -309,10 +309,18 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         dedicated_detour_env_count=128,
         dedicated_detour_lane_count=3,
         # 0.55 m 车宽在 0.60 m 净宽中每侧余量约 0.025 m；门洞按车体横向尺寸校验。
-        # 门洞前后强制保留直线对正段，其他区域仍使用 0.52 m 圆形导航净空。
-        dedicated_detour_passage_width_range=(0.60, 1.35),
-        dedicated_detour_barrier_count_range=(2, 3),
-        dedicated_detour_barrier_y_span=2.45,
+        # 每个课程等级独立配置门洞净宽。相邻两个等级使用同一条线路的
+        # 前半程/后半程，且都跨越两道短墙；其他场景参数暂不参与课程。
+        dedicated_detour_curriculum_passage_width_ranges=(
+            (1.50, 2.0),
+            (1.35, 1.85),
+            (1.2, 1.8),
+            (1.0, 1.6),
+            (0.85, 1.45),
+            (0.7, 1.35),
+        ),
+        dedicated_detour_barrier_count_range=(3, 3),
+        dedicated_detour_barrier_y_span=2.70,
         dedicated_detour_extra_obstacle_count_range=(3, 6),
         dedicated_detour_obstacle_wall_clearance=0.10,
         dedicated_detour_robot_half_width=0.275,
@@ -472,7 +480,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # ====================================================================
     # 有正负的目标进度、近障、动作变化、时间、到达和失败。
     goal_reach_bonus: float = 50.0
-    nav_failure_penalty: float = -30.0  # collision, fall or leaving the arena
+    nav_failure_penalty: float = -25.0  # collision, fall or leaving the arena
     collision_clearance_threshold: float = 0.01
     fall_reset_height: float = -0.25
 
@@ -485,7 +493,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Only a narrow near-collision band is penalized, preserving usable corridors.
     nav_clearance_threshold: float = 0.05
     nav_proximity_cost_per_second: float = 0.
-    nav_time_cost_per_second: float = 0.75
+    nav_time_cost_per_second: float = 1.2
 
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.

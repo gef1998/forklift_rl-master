@@ -79,9 +79,21 @@ class RandomObstacleWorldConfig:
     # and PhysX collision geometry remain identical throughout training.
     dedicated_detour_env_count: int = 128
     dedicated_detour_lane_count: int = 3
-    dedicated_detour_passage_width_range: tuple[float, float] = (0.60, 1.35)
-    dedicated_detour_barrier_count_range: tuple[int, int] = (2, 3)
-    dedicated_detour_barrier_y_span: float = 2.45
+    # One explicit width range per curriculum level, easiest to hardest.
+    # Every lane contains two level-specific gates plus one shared wide gate.
+    dedicated_detour_curriculum_passage_width_ranges: tuple[
+        tuple[float, float], ...
+    ] = (
+        (1.10, 1.55),
+        (1.10, 1.55),
+        (0.85, 1.30),
+        (0.85, 1.30),
+        (0.60, 1.00),
+        (0.60, 1.00),
+    )
+    dedicated_detour_passage_width_samples_per_level: int = 3
+    dedicated_detour_barrier_count_range: tuple[int, int] = (3, 3)
+    dedicated_detour_barrier_y_span: float = 2.70
     dedicated_detour_extra_obstacle_count_range: tuple[int, int] = (3, 6)
     dedicated_detour_obstacle_wall_clearance: float = 0.10
     dedicated_detour_robot_half_width: float = 0.275
@@ -111,8 +123,9 @@ class RandomObstacleWorldConfig:
     def dedicated_detour_barrier_slots(self) -> int:
         if self.dedicated_detour_env_count <= 0:
             return 0
-        return (self.dedicated_detour_lane_count
-                * self.dedicated_detour_barrier_count_range[1])
+        return self.dedicated_detour_lane_count * (
+            2 * self.dedicated_detour_passage_width_samples_per_level + 1
+        )
 
     @property
     def interior_wall_length(self) -> float:
@@ -123,6 +136,38 @@ class RandomObstacleWorldConfig:
         return (self.interior_wall_length - self.narrow_passage_width_range[1]) / 2
 
     @property
+    def dedicated_detour_passage_width_range(self) -> tuple[float, float]:
+        """Overall geometry bounds derived from the explicit curriculum tiers."""
+        ranges = self.dedicated_detour_curriculum_passage_width_ranges
+        if len(ranges) != 2 * self.dedicated_detour_lane_count:
+            raise ValueError(
+                "dedicated detour requires two passage-width ranges per lane"
+            )
+        parsed = []
+        for values in ranges:
+            if len(values) != 2:
+                raise ValueError(
+                    "each dedicated passage-width range must have two values"
+                )
+            low, high = values
+            if (not math.isfinite(low) or not math.isfinite(high)
+                    or low <= 0.0 or low > high):
+                raise ValueError("invalid dedicated passage-width range")
+            parsed.append((low, high))
+        if any(
+            parsed[index][bound] < parsed[index + 1][bound]
+            for index in range(len(parsed) - 1)
+            for bound in (0, 1)
+        ):
+            raise ValueError(
+                "dedicated passage-width ranges must run easiest to hardest"
+            )
+        return (
+            min(low for low, _ in parsed),
+            max(high for _, high in parsed),
+        )
+
+    @property
     def wall_slot_lengths(self) -> tuple[float, ...]:
         base = ((self.interior_wall_length,) * self.num_graph_wall_slots
                 + (self.narrow_gate_wall_length,) * (2 * self.max_narrow_passages))
@@ -131,21 +176,43 @@ class RandomObstacleWorldConfig:
         lane_pitch = (
             self.arena_size - 2 * self.wall_thickness
         ) / self.dedicated_detour_lane_count
-        passage_min, passage_max = self.dedicated_detour_passage_width_range
-        effective_lane_width = lane_pitch - self.interior_wall_thickness / 2
-        longest = effective_lane_width - passage_min
-        # Outer lanes anchor barriers at the outer-wall centre, so their
-        # effective width is half a wall thicker than the middle lane.
-        shortest = lane_pitch - passage_max
-        count = self.dedicated_detour_barrier_count_range[1]
-        if count == 1:
-            pattern = ((longest + shortest) / 2,)
-        else:
-            pattern = tuple(
-                longest + (shortest - longest) * index / (count - 1)
-                for index in range(count)
+        # Validate the explicit ranges before deriving the fixed wall assets.
+        _ = self.dedicated_detour_passage_width_range
+        level_ranges = self.dedicated_detour_curriculum_passage_width_ranges
+        samples = self.dedicated_detour_passage_width_samples_per_level
+        if not isinstance(samples, int) or samples < 1:
+            raise ValueError(
+                "dedicated passage-width samples per level must be positive"
             )
-        return base + pattern * self.dedicated_detour_lane_count
+        if self.dedicated_detour_barrier_count_range != (3, 3):
+            raise ValueError(
+                "six-level dedicated curriculum requires exactly three barriers per lane"
+            )
+        patterns = []
+        for lane in range(self.dedicated_detour_lane_count):
+            lower_range = level_ranges[2 * lane]
+            upper_range = level_ranges[2 * lane + 1]
+            available_span = lane_pitch
+            if 0 < lane < self.dedicated_detour_lane_count - 1:
+                available_span -= self.interior_wall_thickness / 2
+            def sampled_lengths(width_range):
+                low, high = width_range
+                if samples == 1:
+                    widths = ((low + high) / 2,)
+                else:
+                    widths = tuple(
+                        low + (high - low) * index / (samples - 1)
+                        for index in range(samples)
+                    )
+                return tuple(available_span - width for width in widths)
+
+            patterns.extend(sampled_lengths(lower_range))
+            # The shared middle gate is wider than both level-specific gates.
+            patterns.append(
+                available_span - max(lower_range[1], upper_range[1])
+            )
+            patterns.extend(sampled_lengths(upper_range))
+        return base + tuple(patterns)
 
     _obstacle_types: list[str] = field(default_factory=list)
     _obstacle_radii: list[float] = field(default_factory=list)
@@ -459,6 +526,12 @@ class RandomObstacleWorldManager:
                 base_wall_slot_count=self.cfg.base_num_wall_slots,
                 lane_count=self.cfg.dedicated_detour_lane_count,
                 passage_width_range=self.cfg.dedicated_detour_passage_width_range,
+                curriculum_passage_width_ranges=(
+                    self.cfg.dedicated_detour_curriculum_passage_width_ranges
+                ),
+                passage_width_samples_per_level=(
+                    self.cfg.dedicated_detour_passage_width_samples_per_level
+                ),
                 barrier_count_range=self.cfg.dedicated_detour_barrier_count_range,
                 barrier_y_span=self.cfg.dedicated_detour_barrier_y_span,
                 extra_obstacle_count_range=(

@@ -56,9 +56,15 @@ def sample_straight_detour_layout(
     wall_width=0.15,
     base_wall_slot_count=16,
     lane_count=3,
-    passage_width_range=(0.60, 1.35),
-    barrier_count_range=(2, 3),
-    barrier_y_span=2.45,
+    passage_width_range=(0.60, 1.55),
+    curriculum_passage_width_ranges=(
+        (1.10, 1.55), (1.10, 1.55),
+        (0.85, 1.30), (0.85, 1.30),
+        (0.60, 1.00), (0.60, 1.00),
+    ),
+    passage_width_samples_per_level=3,
+    barrier_count_range=(3, 3),
+    barrier_y_span=2.70,
     extra_obstacle_count_range=(3, 6),
     obstacle_wall_clearance=0.10,
     robot_half_width=0.275,
@@ -83,12 +89,33 @@ def sample_straight_detour_layout(
     if lengths.ndim != 1 or (lengths <= 0.0).any():
         raise ValueError("wall_lengths must be a positive one-dimensional array")
     passage_min, passage_max = _range("passage_width_range", passage_width_range)
+    level_ranges = np.asarray(
+        curriculum_passage_width_ranges, dtype=np.float64
+    )
     barrier_min, barrier_max = _range(
         "barrier_count_range", barrier_count_range, integer=True)
     obstacle_min, obstacle_max = _range(
         "extra_obstacle_count_range", extra_obstacle_count_range, integer=True)
-    if lane_count < 1 or barrier_min < 2 or obstacle_min < lane_count:
-        raise ValueError("detour requires lanes, at least two barriers per lane, and one obstacle per lane")
+    if lane_count < 1 or obstacle_min < lane_count:
+        raise ValueError("detour requires lanes and one obstacle per lane")
+    if curriculum_levels != 2 * lane_count:
+        raise ValueError("six-level detour requires two curriculum levels per lane")
+    if (not isinstance(passage_width_samples_per_level, int)
+            or passage_width_samples_per_level < 1):
+        raise ValueError("passage_width_samples_per_level must be positive")
+    if level_ranges.shape != (curriculum_levels, 2):
+        raise ValueError("one passage-width range is required per curriculum level")
+    if (not np.isfinite(level_ranges).all()
+            or (level_ranges[:, 0] <= 0.0).any()
+            or (level_ranges[:, 0] > level_ranges[:, 1]).any()
+            or (level_ranges < passage_min - 1.0e-9).any()
+            or (level_ranges > passage_max + 1.0e-9).any()):
+        raise ValueError("invalid curriculum passage-width ranges")
+    if ((level_ranges[:-1, 0] < level_ranges[1:, 0]).any()
+            or (level_ranges[:-1, 1] < level_ranges[1:, 1]).any()):
+        raise ValueError("curriculum passage widths must run easiest to hardest")
+    if (barrier_min, barrier_max) != (3, 3):
+        raise ValueError("six-level detour requires exactly three barriers per lane")
     if min(robot_half_width, robot_half_length, collision_clearance) <= 0.0:
         raise ValueError("robot footprint and collision clearance must be positive")
     minimum_physical_passage = 2.0 * (
@@ -105,7 +132,8 @@ def sample_straight_detour_layout(
     inner_half = arena_size / 2.0 - outer_wall_thickness
     full_segment_length = (arena_size - 2.0 * outer_wall_thickness) / 3.0
     divider_slots = (lane_count - 1) * 3
-    barrier_slots = lane_count * barrier_max
+    slots_per_lane = 2 * passage_width_samples_per_level + 1
+    barrier_slots = lane_count * slots_per_lane
     if base_wall_slot_count < divider_slots:
         raise ValueError("base wall slots cannot hold the lane dividers")
     if lengths.size < base_wall_slot_count + barrier_slots:
@@ -157,17 +185,23 @@ def sample_straight_detour_layout(
     passage_widths = []
     route_waypoints = []
     gate_centers = []
+    curriculum_endpoint_ys = []
     outer_centers = (-arena_size / 2.0 + outer_wall_thickness / 2.0,
                      arena_size / 2.0 - outer_wall_thickness / 2.0)
     for lane in range(lane_count):
-        count = int(rng.integers(barrier_min, barrier_max + 1))
+        count = 3
         barrier_counts[lane] = count
         y_positions = np.linspace(-barrier_y_span, barrier_y_span, count)
-        y_positions += rng.uniform(-0.10, 0.10, count)
-        available = np.arange(
-            base_wall_slot_count + lane * barrier_max,
-            base_wall_slot_count + (lane + 1) * barrier_max)
-        selected = rng.permutation(available)[:count]
+        y_positions += rng.uniform(-0.05, 0.05, count)
+        lane_slot_start = base_wall_slot_count + lane * slots_per_lane
+        lower_slot = lane_slot_start + int(rng.integers(
+            0, passage_width_samples_per_level
+        ))
+        middle_slot = lane_slot_start + passage_width_samples_per_level
+        upper_slot = middle_slot + 1 + int(rng.integers(
+            0, passage_width_samples_per_level
+        ))
+        selected = np.array((lower_slot, middle_slot, upper_slot))
         from_left = (np.arange(count) + int(rng.integers(0, 2))) % 2 == 0
         gate_x = np.empty(count, dtype=np.float64)
         actual_widths = np.empty(count, dtype=np.float64)
@@ -207,7 +241,23 @@ def sample_straight_detour_layout(
                           [x, y + gate_guard]))
         route.append([lane_centers[lane], spawn_y])
         route_waypoints.append(np.asarray(route, dtype=np.float64))
-        gate_centers.append(np.asarray(ordered_gates, dtype=np.float64))
+        ordered_gates = np.asarray(ordered_gates, dtype=np.float64)
+        gate_centers.append(ordered_gates)
+
+        endpoint_margin = 0.03
+        endpoint_guard = max(
+            gate_guard,
+            max(emma_clearance, goal_clearance) + wall_width / 2.0,
+        )
+        lower_inner_y = ordered_gates[0, 1] + endpoint_guard + endpoint_margin
+        upper_inner_y = ordered_gates[2, 1] - endpoint_guard - endpoint_margin
+        if (lower_inner_y >= ordered_gates[1, 1] - gate_guard - endpoint_margin
+                or upper_inner_y <= ordered_gates[1, 1] + gate_guard + endpoint_margin):
+            raise ValueError("curriculum routes have no alignment room around middle gate")
+        endpoints = ((-spawn_y, upper_inner_y), (lower_inner_y, spawn_y))
+        if any(top - bottom <= min_goal_distance for bottom, top in endpoints):
+            raise ValueError("curriculum route violates min_goal_distance")
+        curriculum_endpoint_ys.append(endpoints)
 
     positions = np.zeros((radii.size, 2), dtype=np.float64)
     obstacle_active = np.zeros(radii.size, dtype=bool)
@@ -243,7 +293,8 @@ def sample_straight_detour_layout(
             )
             endpoint_clearance = min(
                 math.hypot(spawn_dx, candidate[1] - endpoint_y)
-                for endpoint_y in (-spawn_y, spawn_y)
+                for endpoints in curriculum_endpoint_ys[lane]
+                for endpoint_y in endpoints
             )
             if endpoint_clearance < radius + max(emma_clearance, goal_clearance):
                 continue
@@ -274,18 +325,52 @@ def sample_straight_detour_layout(
                 f"(seed={seed}, lane={lane}, slot={obstacle_slot}, "
                 f"radius={radius:.3f}, requested={requested_obstacles})")
 
-    spawn_pairs = np.empty((spawn_bank_size, 2, 2), dtype=np.float64)
+    def make_spawn_pairs(lane_ids, bottom_y=-spawn_y, top_y=spawn_y):
+        pairs = np.empty((spawn_bank_size, 2, 2), dtype=np.float64)
+        for index, lane in enumerate(lane_ids):
+            bottom = np.array((lane_centers[lane] + rng.uniform(
+                -spawn_lateral_jitter, spawn_lateral_jitter), bottom_y))
+            top = np.array((lane_centers[lane] + rng.uniform(
+                -spawn_lateral_jitter, spawn_lateral_jitter), top_y))
+            pairs[index] = (
+                (bottom, top) if rng.random() < 0.5 else (top, bottom)
+            )
+        return pairs
+
     spawn_lane_ids = np.arange(spawn_bank_size, dtype=np.int64) % lane_count
     rng.shuffle(spawn_lane_ids)
-    for index, lane in enumerate(spawn_lane_ids):
-        bottom = np.array((lane_centers[lane] + rng.uniform(
-            -spawn_lateral_jitter, spawn_lateral_jitter), -spawn_y))
-        top = np.array((lane_centers[lane] + rng.uniform(
-            -spawn_lateral_jitter, spawn_lateral_jitter), spawn_y))
-        spawn_pairs[index] = (bottom, top) if rng.random() < 0.5 else (top, bottom)
+    spawn_pairs = make_spawn_pairs(spawn_lane_ids)
     if (np.linalg.norm(spawn_pairs[:, 1] - spawn_pairs[:, 0], axis=-1)
             <= min_goal_distance).any():
         raise RuntimeError("dedicated-detour spawn bank violates min_goal_distance")
+
+    # Two levels share each fixed lane but cross different outer gates; both
+    # routes also cross the shared wide middle gate. This provides six real
+    # width distributions without moving geometry between episode resets.
+    curriculum_lane_ids = np.arange(curriculum_levels, dtype=np.int64) // 2
+    curriculum_passage_widths = np.empty(curriculum_levels, dtype=np.float64)
+    curriculum_pairs = np.empty(
+        (curriculum_levels, spawn_bank_size, 2, 2), dtype=np.float64
+    )
+    curriculum_spawn_lane_ids = np.empty(
+        (curriculum_levels, spawn_bank_size), dtype=np.int64
+    )
+    for level, lane in enumerate(curriculum_lane_ids):
+        lane_ids = np.full(spawn_bank_size, lane, dtype=np.int64)
+        curriculum_spawn_lane_ids[level] = lane_ids
+        bottom_y, top_y = curriculum_endpoint_ys[lane][level % 2]
+        curriculum_pairs[level] = make_spawn_pairs(
+            lane_ids, bottom_y=bottom_y, top_y=top_y
+        )
+        curriculum_passage_widths[level] = passage_widths[lane][
+            0 if level % 2 == 0 else 2
+        ]
+    if (np.linalg.norm(
+            curriculum_pairs[:, :, 1] - curriculum_pairs[:, :, 0], axis=-1
+            ) <= min_goal_distance).any():
+        raise RuntimeError(
+            "dedicated-detour curriculum bank violates min_goal_distance"
+        )
 
     return {
         "positions": positions,
@@ -294,8 +379,12 @@ def sample_straight_detour_layout(
         "wall_poses": wall_poses,
         "wall_active": wall_active,
         "spawn_pairs": spawn_pairs,
-        "curriculum_pairs": np.repeat(spawn_pairs[None], curriculum_levels, axis=0),
+        "curriculum_pairs": curriculum_pairs,
         "spawn_lane_ids": spawn_lane_ids,
+        "curriculum_lane_ids": curriculum_lane_ids,
+        "curriculum_spawn_lane_ids": curriculum_spawn_lane_ids,
+        "curriculum_passage_widths": curriculum_passage_widths,
+        "curriculum_endpoint_ys": np.asarray(curriculum_endpoint_ys),
         "passage_widths": tuple(passage_widths),
         "barrier_counts": barrier_counts,
         "barrier_count": int(barrier_counts.sum()),
