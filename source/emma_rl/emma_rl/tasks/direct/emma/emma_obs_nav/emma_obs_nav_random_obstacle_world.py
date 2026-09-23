@@ -14,6 +14,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
 
 from .structured_random_geometry import sample_connected_layout
+from .straight_detour_geometry import sample_straight_detour_layout
 
 from .random_obstacle_geometry import (
     alternating_obstacle_types,
@@ -73,6 +74,23 @@ class RandomObstacleWorldConfig:
     ultra_dense_clutter_influence_radius: float = 0.70
     min_connected_free_fraction: float = 0.60
 
+    # Reserve the final N parallel environments for a sealed straight-line
+    # detour task. Geometry is sampled once at startup so the static Warp mesh
+    # and PhysX collision geometry remain identical throughout training.
+    dedicated_detour_env_count: int = 128
+    dedicated_detour_lane_count: int = 3
+    dedicated_detour_passage_width_range: tuple[float, float] = (0.60, 1.35)
+    dedicated_detour_barrier_count_range: tuple[int, int] = (2, 3)
+    dedicated_detour_barrier_y_span: float = 2.45
+    dedicated_detour_extra_obstacle_count_range: tuple[int, int] = (3, 6)
+    dedicated_detour_obstacle_wall_clearance: float = 0.10
+    dedicated_detour_robot_half_width: float = 0.275
+    dedicated_detour_robot_half_length: float = 0.425
+    dedicated_detour_collision_clearance: float = 0.01
+    dedicated_detour_spawn_y: float = 3.55
+    dedicated_detour_spawn_lateral_jitter: float = 0.20
+    dedicated_detour_heading_half_angle_deg: float = 15.0
+
     @property
     def num_graph_wall_slots(self) -> int:
         return 2 * self.grid_size * (self.grid_size - 1) if self.structured_layout else 0
@@ -81,7 +99,20 @@ class RandomObstacleWorldConfig:
     def num_wall_slots(self) -> int:
         if not self.structured_layout:
             return 0
+        return self.base_num_wall_slots + self.dedicated_detour_barrier_slots
+
+    @property
+    def base_num_wall_slots(self) -> int:
+        if not self.structured_layout:
+            return 0
         return self.num_graph_wall_slots + 2 * self.max_narrow_passages
+
+    @property
+    def dedicated_detour_barrier_slots(self) -> int:
+        if self.dedicated_detour_env_count <= 0:
+            return 0
+        return (self.dedicated_detour_lane_count
+                * self.dedicated_detour_barrier_count_range[1])
 
     @property
     def interior_wall_length(self) -> float:
@@ -93,8 +124,28 @@ class RandomObstacleWorldConfig:
 
     @property
     def wall_slot_lengths(self) -> tuple[float, ...]:
-        return ((self.interior_wall_length,) * self.num_graph_wall_slots
+        base = ((self.interior_wall_length,) * self.num_graph_wall_slots
                 + (self.narrow_gate_wall_length,) * (2 * self.max_narrow_passages))
+        if not self.dedicated_detour_barrier_slots:
+            return base
+        lane_pitch = (
+            self.arena_size - 2 * self.wall_thickness
+        ) / self.dedicated_detour_lane_count
+        passage_min, passage_max = self.dedicated_detour_passage_width_range
+        effective_lane_width = lane_pitch - self.interior_wall_thickness / 2
+        longest = effective_lane_width - passage_min
+        # Outer lanes anchor barriers at the outer-wall centre, so their
+        # effective width is half a wall thicker than the middle lane.
+        shortest = lane_pitch - passage_max
+        count = self.dedicated_detour_barrier_count_range[1]
+        if count == 1:
+            pattern = ((longest + shortest) / 2,)
+        else:
+            pattern = tuple(
+                longest + (shortest - longest) * index / (count - 1)
+                for index in range(count)
+            )
+        return base + pattern * self.dedicated_detour_lane_count
 
     _obstacle_types: list[str] = field(default_factory=list)
     _obstacle_radii: list[float] = field(default_factory=list)
@@ -232,6 +283,18 @@ class RandomObstacleWorldManager:
         self.wall_active = torch.zeros(num_envs, cfg.num_wall_slots, dtype=torch.bool, device=device)
         self.spawn_pairs = None
         self.curriculum_spawn_pairs = None
+        if not isinstance(cfg.dedicated_detour_env_count, int) or cfg.dedicated_detour_env_count < 0:
+            raise ValueError("dedicated_detour_env_count must be a non-negative integer")
+        if cfg.dedicated_detour_env_count and not cfg.structured_layout:
+            raise ValueError("dedicated detour environments require structured_layout")
+        self.dedicated_detour_start = max(
+            0, self.num_envs - min(cfg.dedicated_detour_env_count, self.num_envs)
+        )
+        self.dedicated_detour_layouts: dict[int, dict] = {}
+        if not math.isfinite(cfg.dedicated_detour_heading_half_angle_deg) or not (
+            0.0 <= cfg.dedicated_detour_heading_half_angle_deg <= 180.0
+        ):
+            raise ValueError("dedicated detour heading half-angle must be in [0, 180]")
         if len(cfg.spawn_heading_half_angles_deg) != 3 or any(
             not math.isfinite(a) or not 0 <= a <= 180 for a in cfg.spawn_heading_half_angles_deg
         ):
@@ -242,36 +305,114 @@ class RandomObstacleWorldManager:
             # Draw seeds from Torch so the existing training seed also controls CPU geometry.
             seeds = torch.randint(0, 2**31 - 1, (self.num_envs,), device=self.device).cpu().tolist()
             cfg = self.cfg
-            layouts = [sample_connected_layout(
-                cfg._obstacle_bound_radii, seed=seed, arena_size=cfg.arena_size,
-                wall_thickness=cfg.wall_thickness, grid_size=cfg.grid_size,
-                interior_wall_thickness=cfg.interior_wall_thickness,
-                wall_jitter=cfg.wall_jitter, loop_probability_range=cfg.loop_probability_range,
-                clutter_density_range=cfg.clutter_density_range,
-                min_obstacle_spacing=cfg.min_obstacle_spacing,
-                obstacle_wall_clearance=cfg.obstacle_wall_clearance,
-                navigation_clearance=cfg.navigation_clearance,
-                grid_resolution=cfg.connectivity_grid_resolution,
-                emma_clearance=cfg.emma_spawn_clearance_radius,
-                goal_clearance=cfg.goal_spawn_clearance_radius,
-                min_goal_distance=cfg.goal_min_distance, spawn_bank_size=cfg.spawn_bank_size,
-                max_layout_attempts=cfg.max_layout_attempts,
-                include_curriculum_banks=True,
-                curriculum_distance_ranges=cfg.curriculum_distance_ranges,
-                narrow_passage_probability=cfg.narrow_passage_probability,
-                narrow_passage_width_range=cfg.narrow_passage_width_range,
-                max_narrow_passages=cfg.max_narrow_passages,
-                narrow_pair_fraction=cfg.narrow_pair_fraction,
-                dense_clutter_influence_radius=cfg.dense_clutter_influence_radius,
-                ultra_dense_clutter_influence_radius=(
-                    cfg.ultra_dense_clutter_influence_radius
-                ),
-                min_connected_free_fraction=cfg.min_connected_free_fraction,
-            ) for seed in seeds]
-            for name in ("positions", "active", "wall_poses", "wall_active"):
+
+            def sample_one(seed, density_range, max_attempts):
+                return sample_connected_layout(
+                    cfg._obstacle_bound_radii, seed=seed,
+                    arena_size=cfg.arena_size,
+                    wall_thickness=cfg.wall_thickness, grid_size=cfg.grid_size,
+                    interior_wall_thickness=cfg.interior_wall_thickness,
+                    wall_jitter=cfg.wall_jitter,
+                    loop_probability_range=cfg.loop_probability_range,
+                    clutter_density_range=density_range,
+                    min_obstacle_spacing=cfg.min_obstacle_spacing,
+                    obstacle_wall_clearance=cfg.obstacle_wall_clearance,
+                    navigation_clearance=cfg.navigation_clearance,
+                    grid_resolution=cfg.connectivity_grid_resolution,
+                    emma_clearance=cfg.emma_spawn_clearance_radius,
+                    goal_clearance=cfg.goal_spawn_clearance_radius,
+                    min_goal_distance=cfg.goal_min_distance,
+                    spawn_bank_size=cfg.spawn_bank_size,
+                    max_layout_attempts=max_attempts,
+                    include_curriculum_banks=True,
+                    curriculum_distance_ranges=cfg.curriculum_distance_ranges,
+                    narrow_passage_probability=cfg.narrow_passage_probability,
+                    narrow_passage_width_range=cfg.narrow_passage_width_range,
+                    max_narrow_passages=cfg.max_narrow_passages,
+                    narrow_pair_fraction=cfg.narrow_pair_fraction,
+                    dense_clutter_influence_radius=(
+                        cfg.dense_clutter_influence_radius
+                    ),
+                    ultra_dense_clutter_influence_radius=(
+                        cfg.ultra_dense_clutter_influence_radius
+                    ),
+                    min_connected_free_fraction=cfg.min_connected_free_fraction,
+                )
+
+            density_low, density_high = cfg.clutter_density_range
+            fallback_ranges = (
+                (max(0.0, density_low - 0.20),
+                 max(0.0, density_high - 0.20)),
+                (max(0.0, density_low - 0.35),
+                 max(0.0, density_high - 0.35)),
+            )
+            layouts = []
+            fallback_records = []
+            for env_index, seed in enumerate(seeds):
+                try:
+                    layout = sample_one(
+                        seed, cfg.clutter_density_range,
+                        cfg.max_layout_attempts,
+                    )
+                except RuntimeError as initial_error:
+                    layout = None
+                    for fallback_level, density_range in enumerate(
+                            fallback_ranges, start=1):
+                        retry_seed = (
+                            seed ^ (0x6A09E667 * fallback_level)
+                        ) & 0x7FFFFFFF
+                        try:
+                            layout = sample_one(
+                                retry_seed, density_range,
+                                cfg.max_layout_attempts,
+                            )
+                            fallback_records.append(
+                                (env_index, seed, fallback_level, density_range)
+                            )
+                            break
+                        except RuntimeError:
+                            continue
+                    if layout is None:
+                        raise RuntimeError(
+                            "unable to generate structured layout after "
+                            f"density fallbacks (env={env_index}, seed={seed}, "
+                            f"configured_density={cfg.clutter_density_range})"
+                        ) from initial_error
+                layouts.append(layout)
+                if (env_index + 1) % 512 == 0:
+                    print(
+                        "[RandomObstacleWorld] generated "
+                        f"{env_index + 1}/{self.num_envs} structured layouts "
+                        f"(fallbacks={len(fallback_records)})",
+                        flush=True,
+                    )
+            if fallback_records:
+                levels = {
+                    level: sum(record[2] == level for record in fallback_records)
+                    for level in range(1, len(fallback_ranges) + 1)
+                }
+                examples = ", ".join(
+                    f"env={env},seed={seed},level={level}"
+                    for env, seed, level, _ in fallback_records[:5]
+                )
+                print(
+                    "[RandomObstacleWorld] recovered "
+                    f"{len(fallback_records)}/{self.num_envs} layouts with "
+                    f"density fallback levels={levels}; examples: {examples}"
+                )
+            for name in ("positions", "active"):
                 target = getattr(self, name)
                 target.copy_(torch.as_tensor(np.stack([layout[name] for layout in layouts]),
                                              device=self.device, dtype=target.dtype))
+            base_slots = cfg.base_num_wall_slots
+            self.wall_poses.zero_()
+            self.wall_active.zero_()
+            self.wall_poses[:, :base_slots].copy_(torch.as_tensor(
+                np.stack([layout["wall_poses"] for layout in layouts]),
+                device=self.device, dtype=self.wall_poses.dtype))
+            self.wall_active[:, :base_slots].copy_(torch.as_tensor(
+                np.stack([layout["wall_active"] for layout in layouts]),
+                device=self.device, dtype=self.wall_active.dtype))
             self.spawn_pairs = torch.as_tensor(
                 np.stack([layout["spawn_pairs"] for layout in layouts]),
                 device=self.device, dtype=self.positions.dtype,
@@ -281,6 +422,7 @@ class RandomObstacleWorldManager:
                 device=self.device, dtype=self.positions.dtype,
             )
             self.yaws.uniform_(0, 2 * math.pi)
+            self._install_dedicated_detour_layouts(seeds)
             return
         self.positions.copy_(
             sample_random_obstacle_positions(
@@ -299,6 +441,70 @@ class RandomObstacleWorldManager:
             )
             * (2.0 * math.pi)
         )
+
+    def _install_dedicated_detour_layouts(self, seeds: list[int]) -> None:
+        """Replace the last configured layouts with sealed detour corridors."""
+
+        if self.cfg.dedicated_detour_env_count == 0:
+            return
+        wall_lengths = np.asarray(self.cfg.wall_slot_lengths, dtype=np.float64)
+        for env_index in range(self.dedicated_detour_start, self.num_envs):
+            layout = sample_straight_detour_layout(
+                self.cfg._obstacle_bound_radii,
+                wall_lengths,
+                seed=seeds[env_index] ^ 0x5EED5EED,
+                arena_size=self.cfg.arena_size,
+                outer_wall_thickness=self.cfg.wall_thickness,
+                wall_width=self.cfg.interior_wall_thickness,
+                base_wall_slot_count=self.cfg.base_num_wall_slots,
+                lane_count=self.cfg.dedicated_detour_lane_count,
+                passage_width_range=self.cfg.dedicated_detour_passage_width_range,
+                barrier_count_range=self.cfg.dedicated_detour_barrier_count_range,
+                barrier_y_span=self.cfg.dedicated_detour_barrier_y_span,
+                extra_obstacle_count_range=(
+                    self.cfg.dedicated_detour_extra_obstacle_count_range
+                ),
+                obstacle_wall_clearance=(
+                    self.cfg.dedicated_detour_obstacle_wall_clearance
+                ),
+                robot_half_width=self.cfg.dedicated_detour_robot_half_width,
+                robot_half_length=self.cfg.dedicated_detour_robot_half_length,
+                collision_clearance=(
+                    self.cfg.dedicated_detour_collision_clearance
+                ),
+                min_obstacle_spacing=self.cfg.min_obstacle_spacing,
+                navigation_clearance=self.cfg.navigation_clearance,
+                emma_clearance=self.cfg.emma_spawn_clearance_radius,
+                goal_clearance=self.cfg.goal_spawn_clearance_radius,
+                min_goal_distance=self.cfg.goal_min_distance,
+                spawn_bank_size=self.cfg.spawn_bank_size,
+                spawn_y=self.cfg.dedicated_detour_spawn_y,
+                spawn_lateral_jitter=(
+                    self.cfg.dedicated_detour_spawn_lateral_jitter
+                ),
+                curriculum_levels=self.curriculum_spawn_pairs.shape[1],
+            )
+            for name in ("positions", "active", "yaws", "wall_poses", "wall_active"):
+                target = self.yaws if name == "yaws" else getattr(self, name)
+                target[env_index].copy_(torch.as_tensor(
+                    layout[name], device=self.device, dtype=target.dtype))
+            self.spawn_pairs[env_index].copy_(torch.as_tensor(
+                layout["spawn_pairs"], device=self.device,
+                dtype=self.spawn_pairs.dtype))
+            self.curriculum_spawn_pairs[env_index].copy_(torch.as_tensor(
+                layout["curriculum_pairs"], device=self.device,
+                dtype=self.curriculum_spawn_pairs.dtype))
+            self.dedicated_detour_layouts[env_index] = layout
+            widths = ",".join(
+                f"{value:.2f}" for lane in layout["passage_widths"]
+                for value in lane
+            )
+            print(
+                f"[DedicatedDetour] env={env_index} "
+                f"lanes={self.cfg.dedicated_detour_lane_count} "
+                f"barriers={layout['barrier_count']} "
+                f"passages=[{widths}]m obstacles={int(layout['active'].sum())}"
+            )
 
     def write_poses_to_sim(
         self,
@@ -359,6 +565,15 @@ class RandomObstacleWorldManager:
             heading_levels = task_levels.clamp(max=2)
             heading_half = torch.tensor(self.cfg.spawn_heading_half_angles_deg,
                                         device=self.device)[heading_levels] * (math.pi / 180)
+            dedicated = env_ids >= self.dedicated_detour_start
+            if dedicated.any() and self.cfg.dedicated_detour_env_count > 0:
+                dedicated_half = math.radians(
+                    self.cfg.dedicated_detour_heading_half_angle_deg
+                )
+                heading_half = torch.where(
+                    dedicated, torch.full_like(heading_half, dedicated_half),
+                    heading_half,
+                )
             direction = torch.atan2(goal[:, 1] - emma[:, 1], goal[:, 0] - emma[:, 0])
             yaw = direction + (2 * torch.rand(env_ids.numel(), device=self.device) - 1) * heading_half
             yaw = torch.remainder(yaw, 2 * math.pi)

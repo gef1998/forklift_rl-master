@@ -981,34 +981,12 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._dr_wheel_r_scale[:n],
         )
 
-        if cfg.enable_motion_command_low_pass:
-            filtered_wheels, _ = low_pass_wheel_velocity_command(
-                feasible_wheels,
-                self._wheel_vel_cmd[:n],
-                self.step_dt,
-                cfg.motion_command_low_pass_tau_s,
-            )
-        else:
-            filtered_wheels = feasible_wheels
-
-        # Limit nominal acceleration before the shield. Its braking/emergency
-        # decisions retain priority over motion smoothing.
-        if cfg.enable_motion_acceleration_limits:
-            limited_wheels, acceleration_scale = limit_wheel_velocity_acceleration(
-                filtered_wheels, self._wheel_vel_cmd[:n], self.step_dt,
-                cfg.wheel_radius, cfg.wheel_base,
-                cfg.max_linear_acceleration * cfg.linear_acceleration_command_scale,
-                cfg.max_angular_acceleration * cfg.angular_acceleration_command_scale,
-                self._dr_wheel_r_scale[:n],
-            )
-        else:
-            limited_wheels = filtered_wheels
-            acceleration_scale = torch.ones_like(projection_scale)
-        self._wheel_acceleration_scale[:n] = acceleration_scale
-
+        # The clearance governor is part of the policy command path. Apply it
+        # before smoothing so both slowdown and recovery receive the same
+        # low-pass/acceleration dynamics as ordinary policy actions.
         safety_cfg = cfg.safety_control
-        wheel_targets, safety_diag = apply_safety_control(
-            limited_wheels,
+        safe_wheels, safety_diag = apply_safety_control(
+            feasible_wheels,
             self._shield_clearance[:n],
             self._lidar_sector_angles[:n],
             self._shield_aoi[:n],
@@ -1024,6 +1002,29 @@ class EmmaObsNavEnv(DirectRLEnv):
             has_valid_scan=self._has_cached_scan[:n],
             enabled=safety_cfg.enabled,
         )
+
+        if cfg.enable_motion_command_low_pass:
+            filtered_wheels, _ = low_pass_wheel_velocity_command(
+                safe_wheels,
+                self._wheel_vel_cmd[:n],
+                self.step_dt,
+                cfg.motion_command_low_pass_tau_s,
+            )
+        else:
+            filtered_wheels = safe_wheels
+
+        if cfg.enable_motion_acceleration_limits:
+            wheel_targets, acceleration_scale = limit_wheel_velocity_acceleration(
+                filtered_wheels, self._wheel_vel_cmd[:n], self.step_dt,
+                cfg.wheel_radius, cfg.wheel_base,
+                cfg.max_linear_acceleration * cfg.linear_acceleration_command_scale,
+                cfg.max_angular_acceleration * cfg.angular_acceleration_command_scale,
+                self._dr_wheel_r_scale[:n],
+            )
+        else:
+            wheel_targets = filtered_wheels
+            acceleration_scale = torch.ones_like(projection_scale)
+        self._wheel_acceleration_scale[:n] = acceleration_scale
 
         self._raw_wheel_vel_cmd[:n] = raw_wheels
         self._feasible_wheel_vel_cmd[:n] = feasible_wheels
@@ -1066,11 +1067,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             interpolated = self._wheel_target_start + fraction * (
                 self._joint_vel_cmd - self._wheel_target_start
             )
-            # Never interpolate back toward an older, faster command when the
-            # shield has intervened (including stale-scan emergency stops).
-            applied = torch.where(
-                self._safety_intervened.unsqueeze(-1), self._joint_vel_cmd, interpolated
-            )
+            applied = interpolated
         else:
             applied = self._joint_vel_cmd
         self._wheel_vel_cmd.copy_(applied)

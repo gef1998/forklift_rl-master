@@ -254,7 +254,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Goal
     # ====================================================================
     goal_marker_radius: float = 0.2
-    goal_reach_dist: float = 0.3            # ICR 到目标 < 此距离 → 成功
+    goal_reach_dist: float = 0.30           # 与部署到达判定一致；避免窄道通过后仍难以结束
     goal_spawn_half: float = 2.0            # 目标点生成范围 ±2m
 
     # ====================================================================
@@ -277,7 +277,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         cube_size_max=0.45,
         obstacle_height_min=1.0,
         obstacle_height_max=1.2,
-        min_obstacle_spacing=0.60,
+        min_obstacle_spacing=0.50,
         obstacle_wall_clearance=0.30,
         emma_spawn_clearance_radius=0.70,
         goal_spawn_clearance_radius=0.50,
@@ -289,19 +289,38 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         interior_wall_thickness=0.15,
         wall_jitter=0.20,              # 内墙法向独立扰动，单位 m
         loop_probability_range=(0.0, 0.40),
-        clutter_density_range=(0.65, 0.90),  # 高密度静态散障；连通性仍逐图验证
+        # 0.65~0.90 在高窄门概率下兼顾密度与连通生成成功率；更高的
+        # 0.80~1.00 会让部分 seed 耗尽生成次数。极少数失败 seed 自动降密度重试。
+        clutter_density_range=(0.65, 0.90),
         navigation_clearance=0.52,     # 覆盖当前车身半对角线与碰撞余量
         connectivity_grid_resolution=0.15,
         spawn_bank_size=128,
         max_layout_attempts=64,
         # 在同一随机墙图中把部分关键开边收窄；不是切换固定场景模板。
-        narrow_passage_probability=0.85,
+        narrow_passage_probability=0.95,
         narrow_passage_width_range=(1.20, 1.50),
         max_narrow_passages=2,
-        narrow_pair_fraction=0.50,    # 含关键窄门地图的长任务中，50% 强制跨门
+        narrow_pair_fraction=0.75,    # 含关键窄门地图的长任务中，75% 强制跨门
         dense_clutter_influence_radius=1.25,  # 第五级优先选择散障密集区路线
         ultra_dense_clutter_influence_radius=0.70,  # 第六级聚焦更局部的拥挤路线
         min_connected_free_fraction=0.60,  # 所有课程端点仍位于最大连通域
+        # 4096 并行环境中保留约 3.1% 为封闭直行绕障，避免少量样本被 PPO 批次稀释。
+        # 每个 env 含 3 条独立线路，每线 2~3 个交错短墙并放置 3~6 个散障。
+        dedicated_detour_env_count=128,
+        dedicated_detour_lane_count=3,
+        # 0.55 m 车宽在 0.60 m 净宽中每侧余量约 0.025 m；门洞按车体横向尺寸校验。
+        # 门洞前后强制保留直线对正段，其他区域仍使用 0.52 m 圆形导航净空。
+        dedicated_detour_passage_width_range=(0.60, 1.35),
+        dedicated_detour_barrier_count_range=(2, 3),
+        dedicated_detour_barrier_y_span=2.45,
+        dedicated_detour_extra_obstacle_count_range=(3, 6),
+        dedicated_detour_obstacle_wall_clearance=0.10,
+        dedicated_detour_robot_half_width=0.275,
+        dedicated_detour_robot_half_length=0.425,
+        dedicated_detour_collision_clearance=0.01,
+        dedicated_detour_spawn_y=3.55,
+        dedicated_detour_spawn_lateral_jitter=0.20,
+        dedicated_detour_heading_half_angle_deg=15.0,
     )
 
     # ====================================================================
@@ -452,7 +471,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Reward — 直接面向任务的六项奖励，无 VFH 教师
     # ====================================================================
     # 有正负的目标进度、近障、动作变化、时间、到达和失败。
-    goal_reach_bonus: float = 25.0
+    goal_reach_bonus: float = 50.0
     nav_failure_penalty: float = -30.0  # collision, fall or leaving the arena
     collision_clearance_threshold: float = 0.01
     fall_reset_height: float = -0.25
@@ -465,7 +484,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
     nav_clearance_threshold: float = 0.05
-    nav_proximity_cost_per_second: float = 0.25
+    nav_proximity_cost_per_second: float = 0.
     nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.
