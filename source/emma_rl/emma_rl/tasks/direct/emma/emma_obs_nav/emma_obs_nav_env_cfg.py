@@ -44,25 +44,25 @@ class DomainRandCfg:
 
     # ---- 感知噪声 (step-level, 加在 raw LiDAR distance 上, min-pool 前) ----
     enable_lidar_noise: bool = True
-    lidar_noise_std: float = 0.04            # 高斯噪声 std (m)
+    lidar_noise_std: float = 0.03            # 高斯噪声 std (m)
     enable_lidar_dropout: bool = True
     lidar_dropout_prob: float = 0.02         # 每扇区丢帧概率 (min-pool 后)
 
     # ---- 动力学噪声 (episode-level, _reset_idx 中采样) ----
     enable_dynamics_noise: bool = True
     mass_scale_range: tuple = (0.85, 1.15)           # 车身质量缩放 ±15%
-    wheel_radius_scale_range: tuple = (0.99, 1.01)    # 轮径缩放 ±2%
+    wheel_radius_scale_range: tuple = (0.995, 1.005)    # 轮径缩放 ±2%
     com_offset_xy_range: tuple = (-0.01, 0.01)       # 质心偏移 ±2cm
     wheel_slip_noise_std: float = 0.01                # 轮速滑移噪声 (摩擦 proxy)
 
     # ---- 控制噪声 (step-level, _pre_physics_step 中) ----
     enable_action_noise: bool = True
-    action_noise_std: float = 0.06              # signed action noise; matches old 0.03 in [0,1]
+    action_noise_std: float = 0.03              # signed action noise; matches old 0.03 in [0,1]
     action_delay_max_steps: int = 0            # 
     # ---- 初始状态噪声 (episode-level) ----
     enable_init_noise: bool = True
-    init_pos_noise_xy: float = 0.025             # ±5cm
-    init_yaw_noise_deg: float = 2.5            # ±5°
+    init_pos_noise_xy: float = 0.015             # ±5cm
+    init_yaw_noise_deg: float = 1.5            # ±5°
 
 
 @dataclass
@@ -254,7 +254,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Goal
     # ====================================================================
     goal_marker_radius: float = 0.2
-    goal_reach_dist: float = 0.30           # 与部署到达判定一致；避免窄道通过后仍难以结束
+    goal_reach_dist: float = 0.40           # 与部署到达判定一致；避免窄道通过后仍难以结束
     goal_spawn_half: float = 2.0            # 目标点生成范围 ±2m
 
     # ====================================================================
@@ -312,12 +312,12 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         # 每个课程等级独立配置门洞净宽。相邻两个等级使用同一条线路的
         # 前半程/后半程，且都跨越两道短墙；其他场景参数暂不参与课程。
         dedicated_detour_curriculum_passage_width_ranges=(
-            (1.50, 2.0),
-            (1.35, 1.85),
-            (1.2, 1.8),
-            (1.0, 1.6),
-            (0.85, 1.45),
-            (0.7, 1.35),
+            (2.0, 2.5),
+            (1.6, 2.2),
+            (1.6, 1.9),
+            (1.3, 1.7),
+            (1.0, 1.5),
+            (0.7, 1.2),
         ),
         dedicated_detour_barrier_count_range=(3, 3),
         dedicated_detour_barrier_y_span=2.70,
@@ -427,8 +427,15 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     #   噪声加在原始距离上 (模拟传感器误差), min-pool 后再做 dropout
     # ====================================================================
     num_lidar_rays: int = 1440                  # 内部射线数 (360° / 0.25°)
-    lidar_output_sectors: int = 120              # 输出扇区数 (3° × 120 = 360°)
-    lidar_rays_per_sector: int = 12              # 3° / 0.25° = 12
+    # Policy sectors may use either uniform 3-degree pooling or the hybrid-180
+    # layout. The policy-internal safety controller always retains an independent
+    # uniform 120-sector scan so changing network resolution does not also change
+    # the shield semantics.
+    lidar_policy_sector_layout: str = "uniform_120"
+    lidar_output_sectors: int = 120              # policy observation sectors
+    lidar_rays_per_sector: int = 12              # uniform-120 compatibility
+    lidar_safety_output_sectors: int = 120
+    lidar_safety_rays_per_sector: int = 12
     lidar_max_distance: float = 20.0
     lidar_height: float = 0.12                  # LiDAR 安装高度
     lidar_offset_x: float = 0.0               # 偏前 (body +X=前进方向)
@@ -479,22 +486,58 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Reward — 直接面向任务的六项奖励，无 VFH 教师
     # ====================================================================
     # 有正负的目标进度、近障、动作变化、时间、到达和失败。
-    goal_reach_bonus: float = 50.0
+    goal_reach_bonus: float = 35.0
     nav_failure_penalty: float = -25.0  # collision, fall or leaving the arena
     collision_clearance_threshold: float = 0.01
+    # Keep physical contacts and collision sensing enabled. At low curriculum
+    # levels only mild-collision episode termination is relaxed.
+    collision_termination_enabled_by_level: tuple[bool, ...] = (
+        False, False, False, False, True, True,
+    )
+    max_nonterminal_collision_events_by_level: tuple[int, ...] = (
+        10, 8, 4, 2, 0, 0,
+    )
+    nonterminal_collision_event_penalty: float = -4.0
+    collision_release_clearance: float = 0.03
+    severe_collision_clearance: float = -0.05
+    max_continuous_collision_time_s: float = 0.75
     fall_reset_height: float = -0.25
 
     # Signed change in actual goal distance; reward units per metre.
     # Moving away is negative, revisiting the same distance cannot repeatedly
     # collect the old positive-only progress reward (undiscounted transitions).
-    nav_progress_per_meter: float = 5.0
+    nav_progress_per_meter: float = 7.0
+    # Dedicated detour scenes have a certified collision-free polyline. Replace
+    # Euclidean goal progress there with signed arc-length progress, because a
+    # necessary lateral detour may temporarily increase straight-line distance.
+    # This privileged signal is never included in policy observations.
+    reference_path_reward_enabled: bool = True
+    reference_path_progress_per_meter: float = 5.0
+    reference_path_max_progress_per_step: float = 0.10
+    # Keep path following weak: no cost inside the tolerance and a bounded
+    # per-second cost outside it, so obstacle avoidance can depart from the line.
+    reference_path_cross_track_tolerance: float = 0.15
+    reference_path_cross_track_full_cost_error: float = 0.50
+    reference_path_cross_track_cost_per_second: float = 0.25
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
     nav_clearance_threshold: float = 0.05
     nav_proximity_cost_per_second: float = 0.
-    nav_time_cost_per_second: float = 1.2
+    nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.
     nav_action_change_scale: float = 0.08
+
+
+@configclass
+class EmmaObsNavHybrid180EnvCfg(EmmaObsNavEnvCfg):
+    """GRU observation with 1-degree front sectors and 3-degree elsewhere."""
+
+    # 90 front sectors (body yaw -45..+45 deg) plus 90 sectors covering the
+    # remaining 270 degrees. Robot state remains unchanged: 180 + 16 = 196.
+    lidar_policy_sector_layout: str = "hybrid_180"
+    lidar_output_sectors: int = 180
+    single_obs_dim: int = 196
+    observation_space = 196

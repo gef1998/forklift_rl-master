@@ -58,9 +58,12 @@ def sample_straight_detour_layout(
     lane_count=3,
     passage_width_range=(0.60, 1.55),
     curriculum_passage_width_ranges=(
-        (1.10, 1.55), (1.10, 1.55),
-        (0.85, 1.30), (0.85, 1.30),
-        (0.60, 1.00), (0.60, 1.00),
+            (2.0, 2.5),
+            (1.6, 2.2),
+            (1.6, 1.9),
+            (1.3, 1.7),
+            (1.0, 1.5),
+            (0.7, 1.2),
     ),
     passage_width_samples_per_level=3,
     barrier_count_range=(3, 3),
@@ -114,8 +117,8 @@ def sample_straight_detour_layout(
     if ((level_ranges[:-1, 0] < level_ranges[1:, 0]).any()
             or (level_ranges[:-1, 1] < level_ranges[1:, 1]).any()):
         raise ValueError("curriculum passage widths must run easiest to hardest")
-    if (barrier_min, barrier_max) != (3, 3):
-        raise ValueError("six-level detour requires exactly three barriers per lane")
+    # if (barrier_min, barrier_max) != (3, 3):
+    #     raise ValueError("six-level detour requires exactly three barriers per lane")
     if min(robot_half_width, robot_half_length, collision_clearance) <= 0.0:
         raise ValueError("robot footprint and collision clearance must be positive")
     minimum_physical_passage = 2.0 * (

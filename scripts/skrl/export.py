@@ -4,6 +4,7 @@
 Supported tasks
     Emma-RL-ObsNav-Direct-v0        models.name == "EmmaNavShared"  (MLP)
     Emma-RL-ObsNav-GRU-Direct-v0    models.name == "EmmaNavGRU"     (GRU)
+    Emma-RL-ObsNav-GRU-Hybrid180-Direct-v0  models.name == "EmmaNavGRU" (GRU)
 
 ``--task`` is required: it selects the network, and the checkpoint's own saved
 ``params/agent.yaml`` is then held against it.  A checkpoint trained under the
@@ -65,6 +66,7 @@ SHIM_MODULES = {
 TASK_MODELS = {
     "Emma-RL-ObsNav-Direct-v0": "EmmaNavShared",
     "Emma-RL-ObsNav-GRU-Direct-v0": "EmmaNavGRU",
+    "Emma-RL-ObsNav-GRU-Hybrid180-Direct-v0": "EmmaNavGRU",
 }
 MODEL_MODULES = {"EmmaNavShared": "plain", "EmmaNavGRU": "gru"}
 DEFAULT_OPSET = 17

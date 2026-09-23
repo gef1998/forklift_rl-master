@@ -49,6 +49,75 @@ def test_bpearl_raw_scan_starts_at_body_forward_and_turns_left():
     )
 
 
+def test_hybrid_180_layout_has_one_degree_front_and_three_degree_elsewhere():
+    edges = async_lidar.hybrid_180_sector_edges(device="cpu")
+    centers = torch.rad2deg(async_lidar.sector_centers_from_edges(edges))
+    widths = torch.rad2deg(edges[1:] - edges[:-1])
+
+    assert edges.numel() == 181
+    assert centers.numel() == 180
+    torch.testing.assert_close(widths[:45], torch.ones(45), atol=3.0e-5, rtol=0.0)
+    torch.testing.assert_close(
+        widths[45:135], torch.full((90,), 3.0), atol=3.0e-5, rtol=0.0
+    )
+    torch.testing.assert_close(widths[135:], torch.ones(45), atol=3.0e-5, rtol=0.0)
+    torch.testing.assert_close(centers[0], torch.tensor(0.5), atol=5.0e-5, rtol=0.0)
+    torch.testing.assert_close(centers[44], torch.tensor(44.5), atol=5.0e-5, rtol=0.0)
+    torch.testing.assert_close(centers[45], torch.tensor(46.5), atol=5.0e-5, rtol=0.0)
+    torch.testing.assert_close(centers[-1], torch.tensor(359.5), atol=5.0e-5, rtol=0.0)
+
+
+def test_hybrid_180_grouped_pooling_produces_180_sectors():
+    angles = async_lidar.bpearl_planar_ray_angles(
+        1440,
+        horizontal_fov_deg=360.0,
+        horizontal_resolution_deg=0.25,
+        device="cpu",
+    ).unsqueeze(0)
+    ranges = torch.full_like(angles, 10.0)
+    projection = torch.zeros_like(angles)
+    ranges[0, 3] = 1.0
+    ranges[0, 180 + 11] = 2.0
+    ranges[0, 1260 + 2] = 3.0
+
+    pooled_ranges, pooled_angles, pooled_clearance = (
+        async_lidar.min_pool_clearance_rays_grouped(
+            ranges,
+            angles,
+            projection,
+            ((45, 4), (90, 12), (45, 4)),
+        )
+    )
+    assert pooled_ranges.shape == (1, 180)
+    assert pooled_angles.shape == (1, 180)
+    torch.testing.assert_close(pooled_ranges[0, 0], torch.tensor(1.0))
+    torch.testing.assert_close(pooled_ranges[0, 45], torch.tensor(2.0))
+    torch.testing.assert_close(pooled_ranges[0, 135], torch.tensor(3.0))
+    torch.testing.assert_close(pooled_clearance, pooled_ranges)
+
+
+def test_hybrid_180_static_warp_preserves_sector_ranges():
+    edges = async_lidar.hybrid_180_sector_edges(device="cpu")
+    angles = async_lidar.sector_centers_from_edges(edges).unsqueeze(0)
+    ranges = torch.linspace(1.0, 4.0, 180).unsqueeze(0)
+    pose = torch.zeros(1, 3)
+
+    warped_ranges, _ = async_lidar.warp_cached_ranges_and_clearances(
+        ranges,
+        pose,
+        pose,
+        angles,
+        180,
+        20.0,
+        0.4115,
+        0.266,
+        0.0,
+        0.0,
+        edges,
+    )
+    torch.testing.assert_close(warped_ranges, ranges, atol=1.0e-5, rtol=0.0)
+
+
 def test_static_pose_preserves_ranges():
     ranges = torch.tensor([[2.0, 3.0, 4.0, 5.0]])
     pose = torch.zeros(1, 3)

@@ -45,14 +45,18 @@ from .async_lidar import (
     bpearl_planar_ray_angles,
     compute_aoi,
     fill_clearance_outside_forward_fov,
+    hybrid_180_sector_edges,
     min_pool_clearance_rays,
+    min_pool_clearance_rays_grouped,
     sample_sensor_periods,
+    sector_centers_from_edges,
     sensor_due_mask,
     sinusoidal_aoi_encoding,
     warp_cached_ranges_and_clearances,
 )
 from .emma_obs_nav_corridor_world import CorridorWorldManager, spawn_s_corridor
 from .emma_obs_nav_env_cfg import EmmaObsNavEnvCfg
+from .collision_curriculum import collision_curriculum_step
 from .drive_contacts import configure_drive_contacts
 from .emma_obs_nav_straight_obstacle_world import (
     StraightObstacleWorldManager,
@@ -60,6 +64,7 @@ from .emma_obs_nav_straight_obstacle_world import (
 )
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
 from .navigation_rewards import navigation_reward_terms
+from .reference_path import project_points_to_polylines
 from .navigation_curriculum import NavigationCurriculum
 from .safety_control import apply_safety_control
 
@@ -84,6 +89,34 @@ class EmmaObsNavEnv(DirectRLEnv):
             or cfg.motion_command_low_pass_tau_s <= 0.0
         ):
             raise ValueError("motion_command_low_pass_tau_s must be finite and positive")
+        if cfg.reference_path_reward_enabled:
+            if (
+                cfg.reference_path_progress_per_meter < 0.0
+                or cfg.reference_path_max_progress_per_step <= 0.0
+                or cfg.reference_path_cross_track_tolerance < 0.0
+                or cfg.reference_path_cross_track_full_cost_error
+                <= cfg.reference_path_cross_track_tolerance
+                or cfg.reference_path_cross_track_cost_per_second < 0.0
+            ):
+                raise ValueError("invalid reference-path reward configuration")
+        policy_lidar_layout = cfg.lidar_policy_sector_layout.strip().lower()
+        if policy_lidar_layout not in ("uniform_120", "hybrid_180"):
+            raise ValueError(
+                "lidar_policy_sector_layout must be 'uniform_120' or 'hybrid_180'"
+            )
+        cfg.lidar_policy_sector_layout = policy_lidar_layout
+        if policy_lidar_layout == "uniform_120":
+            if cfg.lidar_output_sectors != 120 or cfg.lidar_rays_per_sector != 12:
+                raise ValueError("uniform_120 requires 120 sectors with 12 rays each")
+        elif cfg.lidar_output_sectors != 180 or cfg.num_lidar_rays != 1440:
+            raise ValueError("hybrid_180 requires 180 policy sectors and 1440 rays")
+        if (
+            cfg.lidar_safety_output_sectors != 120
+            or cfg.lidar_safety_rays_per_sector != 12
+            or cfg.num_lidar_rays
+            != cfg.lidar_safety_output_sectors * cfg.lidar_safety_rays_per_sector
+        ):
+            raise ValueError("the safety scan must remain uniform 120 x 12 rays")
         # 必须在 super().__init__() 之前设置 (因为 _setup_scene 在 super 内调用)
         self._world_mode = cfg.world_mode.strip().lower()
         if self._world_mode not in (
@@ -246,6 +279,12 @@ class EmmaObsNavEnv(DirectRLEnv):
               f"×{self.cfg.frame_stack}={self.cfg.observation_space}, "
               f"action_control={self._action_control_mode}, safety={safety_state}")
         print(
+            f"[LiDAR] policy_layout={self.cfg.lidar_policy_sector_layout} "
+            f"policy_sectors={self.cfg.lidar_output_sectors} "
+            f"safety_sectors={self.cfg.lidar_safety_output_sectors} "
+            f"raw_rays={self.cfg.num_lidar_rays}"
+        )
+        print(
             f"[Drive] wheel_radius={self.cfg.wheel_radius:.4f}m "
             f"track_width={self.cfg.wheel_base:.4f}m "
             f"wheel_limit={self.cfg.wheel_max_velocity:.3f}rad/s "
@@ -339,6 +378,25 @@ class EmmaObsNavEnv(DirectRLEnv):
         self.goal_pos_xy = torch.zeros((self.num_envs, 2), device=self.device)
         self._prev_goal_dist = torch.zeros((self.num_envs,), device=self.device)
         self._init_goal_dist = torch.ones((self.num_envs,), device=self.device)  # 初始距离, 用于归一化
+        # Privileged reference paths exist only for the sealed detour scenes.
+        # They shape the training reward but never enter the policy observation.
+        max_reference_waypoints = max(
+            2,
+            3 * self.cfg.random_obstacle_world.dedicated_detour_barrier_count_range[1] + 2,
+        )
+        self._reference_waypoints = torch.zeros(
+            self.num_envs, max_reference_waypoints, 2, device=self.device,
+        )
+        self._reference_point_counts = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device,
+        )
+        self._reference_valid = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device,
+        )
+        self._reference_direction = torch.ones(self.num_envs, device=self.device)
+        self._prev_reference_progress = torch.zeros(self.num_envs, device=self.device)
+        self._last_reference_progress = torch.zeros(self.num_envs, device=self.device)
+        self._last_reference_cross_track = torch.zeros(self.num_envs, device=self.device)
         # ---- 策略原始动作与上一控制步动作 ----
         # _prev_policy_actions 同时供奖励 (动作变化正则) 和观测 [134:136] 使用。
         # DirectRLEnv.step 的顺序是 _get_rewards → _reset_idx → _get_observations,
@@ -376,9 +434,16 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._term_reason = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
         # 最近 2048 个结束回合的终止原因，用统一 extras 日志写入训练 TensorBoard。
         self._termination_reason_window: deque[int] = deque(maxlen=2048)
+        self._episode_collision_window: deque[tuple[int, bool, int]] = deque(
+            maxlen=2048
+        )
         self._termination_rates: dict[str, float] = {
             "goal": 0.0,
+            "clean_goal": 0.0,
+            "goal_with_collision": 0.0,
             "collision": 0.0,
+            "had_collision": 0.0,
+            "collision_events_mean": 0.0,
             "drift": 0.0,
             "timeout": 0.0,
             "fell": 0.0,
@@ -397,16 +462,41 @@ class EmmaObsNavEnv(DirectRLEnv):
             device=self.device,
         ).unsqueeze(0).repeat(self.num_envs, 1)  # (N, num_rays)
 
-        # 1440 条物理射线从正前方开始，reshape 后每 12 条组成 3° 扇区，
-        # 因此标准 120 维顺序是 index 0≈+1.5°，index 60≈-178.5°。
-        sector_step = 360.0 / self.cfg.lidar_output_sectors
-        _sector_centers_deg = torch.arange(
-            self.cfg.lidar_output_sectors, device=self.device
-        ) * sector_step + sector_step / 2.0
-        _sector_centers_rad = torch.deg2rad(_sector_centers_deg)
+        # Policy sector centers. hybrid_180 uses 1-degree sectors in [0, 45)
+        # and [315, 360), which together form body-frame front +/-45 degrees;
+        # the remaining 270 degrees use 3-degree sectors.
+        self._policy_lidar_sector_edges = None
+        self._policy_lidar_sector_groups = None
+        if self.cfg.lidar_policy_sector_layout == "hybrid_180":
+            self._policy_lidar_sector_edges = hybrid_180_sector_edges(
+                device=self.device
+            )
+            self._policy_lidar_sector_groups = ((45, 4), (90, 12), (45, 4))
+            _sector_centers_rad = sector_centers_from_edges(
+                self._policy_lidar_sector_edges
+            )
+        else:
+            sector_step = 360.0 / self.cfg.lidar_output_sectors
+            _sector_centers_deg = torch.arange(
+                self.cfg.lidar_output_sectors, device=self.device
+            ) * sector_step + sector_step / 2.0
+            _sector_centers_rad = torch.deg2rad(_sector_centers_deg)
+        _sector_centers_rad = torch.atan2(
+            torch.sin(_sector_centers_rad), torch.cos(_sector_centers_rad)
+        )
         self._lidar_sector_angles = torch.atan2(
             torch.sin(_sector_centers_rad), torch.cos(_sector_centers_rad)
-        ).unsqueeze(0).repeat(self.num_envs, 1)  # (N, 120)
+        ).unsqueeze(0).repeat(self.num_envs, 1)
+
+        shield_step = 360.0 / self.cfg.lidar_safety_output_sectors
+        _shield_centers_rad = torch.deg2rad(
+            torch.arange(
+                self.cfg.lidar_safety_output_sectors, device=self.device
+            ) * shield_step + shield_step / 2.0
+        )
+        self._shield_lidar_sector_angles = torch.atan2(
+            torch.sin(_shield_centers_rad), torch.cos(_shield_centers_rad)
+        ).unsqueeze(0).repeat(self.num_envs, 1)
 
         # ================================================================
         # Domain Randomization state buffers
@@ -425,12 +515,11 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         # Asynchronous LiDAR state. The raw scan cache is immutable between
         # deliveries; policy-time ranges are always warped from this cache.
-        sectors = self.cfg.lidar_output_sectors
+        policy_sectors = self.cfg.lidar_output_sectors
+        shield_sectors = self.cfg.lidar_safety_output_sectors
         queue_size = self.cfg.lidar_pending_queue_size
         if queue_size < 1:
             raise ValueError("lidar_pending_queue_size must be at least 1")
-        if self.cfg.num_lidar_rays != sectors * self.cfg.lidar_rays_per_sector:
-            raise ValueError("num_lidar_rays must equal lidar_output_sectors * lidar_rays_per_sector")
         if not 0.0 <= self.cfg.lidar_scan_dropout_prob <= 1.0:
             raise ValueError("lidar_scan_dropout_prob must be in [0, 1]")
         if self.cfg.lidar_jitter_max_steps < 0:
@@ -454,6 +543,61 @@ class EmmaObsNavEnv(DirectRLEnv):
             )
         if self.cfg.collision_clearance_threshold < 0:
             raise ValueError("collision_clearance_threshold must be non-negative")
+        curriculum_levels = len(self.cfg.curriculum.noise_ranges)
+        collision_termination = self.cfg.collision_termination_enabled_by_level
+        collision_budgets = self.cfg.max_nonterminal_collision_events_by_level
+        if len(collision_termination) != curriculum_levels:
+            raise ValueError(
+                "collision_termination_enabled_by_level must match curriculum levels"
+            )
+        if len(collision_budgets) != curriculum_levels or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < 0
+            for value in collision_budgets
+        ):
+            raise ValueError(
+                "max_nonterminal_collision_events_by_level must contain "
+                "one non-negative integer per curriculum level"
+            )
+        if any(not isinstance(value, bool) for value in collision_termination):
+            raise ValueError(
+                "collision_termination_enabled_by_level must contain booleans"
+            )
+        if not (
+            math.isfinite(self.cfg.collision_release_clearance)
+            and self.cfg.collision_release_clearance
+            > self.cfg.collision_clearance_threshold
+        ):
+            raise ValueError(
+                "collision_release_clearance must exceed collision_clearance_threshold"
+            )
+        if not (
+            math.isfinite(self.cfg.severe_collision_clearance)
+            and self.cfg.severe_collision_clearance
+            < self.cfg.collision_clearance_threshold
+        ):
+            raise ValueError(
+                "severe_collision_clearance must be below collision_clearance_threshold"
+            )
+        if not (
+            math.isfinite(self.cfg.max_continuous_collision_time_s)
+            and self.cfg.max_continuous_collision_time_s > 0.0
+        ):
+            raise ValueError(
+                "max_continuous_collision_time_s must be finite and positive"
+            )
+        if not (
+            math.isfinite(self.cfg.nonterminal_collision_event_penalty)
+            and self.cfg.nonterminal_collision_event_penalty <= 0.0
+        ):
+            raise ValueError(
+                "nonterminal_collision_event_penalty must be finite and non-positive"
+            )
+        self._collision_termination_by_level = torch.as_tensor(
+            collision_termination, dtype=torch.bool, device=self.device
+        )
+        self._collision_budget_by_level = torch.as_tensor(
+            collision_budgets, dtype=torch.long, device=self.device
+        )
         for name in (
             "nav_progress_per_meter", "nav_proximity_cost_per_second",
             "nav_time_cost_per_second", "nav_action_change_scale", "goal_reach_bonus",
@@ -471,14 +615,16 @@ class EmmaObsNavEnv(DirectRLEnv):
         ):
             raise ValueError("ground friction must satisfy static >= dynamic >= 0")
         self._cached_scan_ranges = torch.full(
-            (self.num_envs, sectors), self.cfg.lidar_max_distance, device=self.device)
+            (self.num_envs, policy_sectors), self.cfg.lidar_max_distance,
+            device=self.device)
         self._cached_scan_angles = self._lidar_sector_angles.clone()
         # Shield cache follows the same physical timing but is independent of
         # policy-only sector dropout. It therefore cannot interpret training
         # dropout as free space.
         self._cached_shield_scan_ranges = torch.full(
-            (self.num_envs, sectors), self.cfg.lidar_max_distance, device=self.device)
-        self._cached_shield_scan_angles = self._lidar_sector_angles.clone()
+            (self.num_envs, shield_sectors), self.cfg.lidar_max_distance,
+            device=self.device)
+        self._cached_shield_scan_angles = self._shield_lidar_sector_angles.clone()
         self._cached_sensor_pose = torch.zeros(self.num_envs, 3, device=self.device)
         self._cached_timestamp = torch.zeros(self.num_envs, device=self.device)
         self._has_cached_scan = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -495,13 +641,14 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._lidar_aoi = torch.zeros(self.num_envs, device=self.device)
 
         self._pending_scan_ranges = torch.full(
-            (self.num_envs, queue_size, sectors), self.cfg.lidar_max_distance, device=self.device)
+            (self.num_envs, queue_size, policy_sectors),
+            self.cfg.lidar_max_distance, device=self.device)
         self._pending_scan_angles = self._lidar_sector_angles.unsqueeze(1).repeat(
             1, queue_size, 1)
         self._pending_shield_scan_ranges = torch.full(
-            (self.num_envs, queue_size, sectors), self.cfg.lidar_max_distance,
+            (self.num_envs, queue_size, shield_sectors), self.cfg.lidar_max_distance,
             device=self.device)
-        self._pending_shield_scan_angles = self._lidar_sector_angles.unsqueeze(1).repeat(
+        self._pending_shield_scan_angles = self._shield_lidar_sector_angles.unsqueeze(1).repeat(
             1, queue_size, 1)
         self._pending_sensor_pose = torch.zeros(
             self.num_envs, queue_size, 3, device=self.device)
@@ -516,14 +663,27 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         # Separate delayed shield data from current reward/termination geometry.
         self._shield_clearance = torch.full(
-            (self.num_envs, sectors), self.cfg.lidar_max_distance,
+            (self.num_envs, shield_sectors), self.cfg.lidar_max_distance,
             device=self.device)
         self._shield_aoi = torch.zeros(self.num_envs, device=self.device)
         self._safety_clearance = torch.full(
-            (self.num_envs, sectors), self.cfg.lidar_max_distance,
+            (self.num_envs, shield_sectors), self.cfg.lidar_max_distance,
             device=self.device)
         self._collision_mask = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device)
+        self._collision_event_mask = torch.zeros_like(self._collision_mask)
+        self._nonterminal_collision_event_mask = torch.zeros_like(
+            self._collision_mask
+        )
+        self._collision_terminal_mask = torch.zeros_like(self._collision_mask)
+        self._collision_contact_active = torch.zeros_like(self._collision_mask)
+        self._collision_contact_duration_s = torch.zeros(
+            self.num_envs, device=self.device
+        )
+        self._episode_collision_events = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._episode_had_collision = torch.zeros_like(self._collision_mask)
         self._failure_mask = torch.zeros_like(self._collision_mask)
         self._goal_reached_mask = torch.zeros_like(self._collision_mask)
         self._latest_clean_raw_ranges = torch.full(
@@ -538,12 +698,13 @@ class EmmaObsNavEnv(DirectRLEnv):
             device=self.device,
         )
         self._lidar_sample_step = -1
-        rect_projection = self._rect_projection().view(
-            self.num_envs, sectors, self.cfg.lidar_rays_per_sector)
-        self._ray_rect_projection = rect_projection.reshape(
-            self.num_envs, self.cfg.num_lidar_rays)
-        self._sector_rect_projection = rect_projection[
-            :, :, self.cfg.lidar_rays_per_sector // 2]
+        self._ray_rect_projection = self._rect_projection()
+        self._sector_rect_projection = self._projection_for_sector_angles(
+            self._lidar_sector_angles
+        )
+        self._shield_sector_rect_projection = self._projection_for_sector_angles(
+            self._shield_lidar_sector_angles
+        )
 
     # ==================================================================
     # Scene setup
@@ -691,7 +852,9 @@ class EmmaObsNavEnv(DirectRLEnv):
             spawn=sim_utils.SphereCfg(
                 radius=self.cfg.goal_marker_radius,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-                collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
+                collision_props=sim_utils.CollisionPropertiesCfg(
+                    collision_enabled=False
+                ),
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, -100)),
@@ -988,7 +1151,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         safe_wheels, safety_diag = apply_safety_control(
             feasible_wheels,
             self._shield_clearance[:n],
-            self._lidar_sector_angles[:n],
+            self._shield_lidar_sector_angles[:n],
             self._shield_aoi[:n],
             wheel_radius=cfg.wheel_radius,
             wheel_base=cfg.wheel_base,
@@ -1175,7 +1338,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._cached_scan_ranges[env_ids] = cfg.lidar_max_distance
         self._cached_scan_angles[env_ids] = self._lidar_sector_angles[env_ids]
         self._cached_shield_scan_ranges[env_ids] = cfg.lidar_max_distance
-        self._cached_shield_scan_angles[env_ids] = self._lidar_sector_angles[env_ids]
+        self._cached_shield_scan_angles[env_ids] = (
+            self._shield_lidar_sector_angles[env_ids]
+        )
         self._cached_sensor_pose[env_ids] = 0.0
         self._cached_timestamp[env_ids] = current_time[env_ids]
         self._pending_valid[env_ids] = False
@@ -1249,8 +1414,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         per_ray_clearance = raw_ranges - self._ray_rect_projection
         self._safety_clearance = per_ray_clearance.view(
             self.num_envs,
-            cfg.lidar_output_sectors,
-            cfg.lidar_rays_per_sector,
+            cfg.lidar_safety_output_sectors,
+            cfg.lidar_safety_rays_per_sector,
         ).amin(dim=-1)
         self._collision_mask = (
             self._safety_clearance.amin(dim=-1) <= cfg.collision_clearance_threshold
@@ -1276,14 +1441,31 @@ class EmmaObsNavEnv(DirectRLEnv):
             raw_ranges = torch.where(valid, noisy, raw_ranges)
         raw_ranges = raw_ranges.clamp(min=0.0, max=cfg.lidar_max_distance)
 
-        sector_ranges, sector_angles, _ = min_pool_clearance_rays(
-            raw_ranges,
-            self._lidar_ray_angles,
-            self._ray_rect_projection,
-            cfg.lidar_output_sectors,
-        )
-        shield_sector_ranges = sector_ranges.clone()
-        shield_sector_angles = sector_angles.clone()
+        if cfg.lidar_policy_sector_layout == "hybrid_180":
+            sector_ranges, sector_angles, _ = min_pool_clearance_rays_grouped(
+                raw_ranges,
+                self._lidar_ray_angles,
+                self._ray_rect_projection,
+                self._policy_lidar_sector_groups,
+            )
+            # Same noisy physical scan, but an independent uniform angular
+            # aggregation for the policy-internal safety controller.
+            shield_sector_ranges, shield_sector_angles, _ = min_pool_clearance_rays(
+                raw_ranges,
+                self._lidar_ray_angles,
+                self._ray_rect_projection,
+                cfg.lidar_safety_output_sectors,
+            )
+        else:
+            sector_ranges, sector_angles, _ = min_pool_clearance_rays(
+                raw_ranges,
+                self._lidar_ray_angles,
+                self._ray_rect_projection,
+                cfg.lidar_output_sectors,
+            )
+            # Preserve the original uniform-120 fast path.
+            shield_sector_ranges = sector_ranges.clone()
+            shield_sector_angles = sector_angles.clone()
         if dr.enable_lidar_dropout:
             dropout_prob = dr.lidar_dropout_prob * noise_scale[:, None]
             sector_dropout = torch.rand_like(sector_ranges) < dropout_prob
@@ -1439,6 +1621,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             cfg.robot_half_width,
             cfg.lidar_offset_x,
             cfg.lidar_offset_y,
+            self._policy_lidar_sector_edges,
         )
         current_ranges = torch.where(
             self._has_cached_scan.unsqueeze(1),
@@ -1459,17 +1642,20 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._cached_sensor_pose,
             target_pose,
             self._cached_shield_scan_angles,
-            cfg.lidar_output_sectors,
+            cfg.lidar_safety_output_sectors,
             cfg.lidar_max_distance,
             cfg.robot_half_length,
             cfg.robot_half_width,
             cfg.lidar_offset_x,
             cfg.lidar_offset_y,
         )
+        shield_default_clearance = (
+            cfg.lidar_max_distance - self._shield_sector_rect_projection
+        )
         self._shield_clearance = torch.where(
             self._has_cached_scan.unsqueeze(1),
             shield_clearance,
-            default_clearance,
+            shield_default_clearance,
         )
         aoi = compute_aoi(current_time, self._cached_timestamp)
         self._lidar_aoi = aoi
@@ -1533,18 +1719,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             self, "_lidar_fov_debug_printed", False
         ):
             self._lidar_fov_debug_printed = True
-            sector_width = 2.0 * math.pi / cfg.lidar_output_sectors
-            final_angles = (
-                torch.arange(
-                    cfg.lidar_output_sectors,
-                    device=self.device,
-                    dtype=clearance.dtype,
-                )
-                + 0.5
-            ) * sector_width
-            final_angles = torch.atan2(
-                torch.sin(final_angles), torch.cos(final_angles)
-            )
+            final_angles = self._lidar_sector_angles[0]
             source_angles = self._lidar_sector_angles[0]
             half_fov = math.radians(
                 cfg.lidar_observation_forward_half_fov_deg
@@ -1574,7 +1749,15 @@ class EmmaObsNavEnv(DirectRLEnv):
                 f"max_mask_difference={max_mask_difference:.6f}",
                 flush=True,
             )
-            probe_indices = (0, 22, 23, 36, 37, 60, 82, 83, 96, 97, 119)
+            probe_indices = tuple(
+                sorted({
+                    0,
+                    cfg.lidar_output_sectors // 4,
+                    cfg.lidar_output_sectors // 2,
+                    3 * cfg.lidar_output_sectors // 4,
+                    cfg.lidar_output_sectors - 1,
+                })
+            )
             print(
                 "[PLAY LIDAR FOV DEBUG] "
                 "idx final_deg label_deg raw_m policy_m expected_m",
@@ -1608,16 +1791,16 @@ class EmmaObsNavEnv(DirectRLEnv):
                 self.num_envs, cfg.time_encoding_dim, device=self.device)
 
         # ================================================================
-        # 组装观测: 120 + 2 + 1 + 2 + 1 + 8 + 2 = 136
+        # Observation: policy LiDAR sectors + 16 robot/task state values.
         # ================================================================
         obs = torch.cat([
-            lidar_norm,                #   0:120  (120)
-            goal_dir_b,                # 120:122  (2)
-            goal_dist_norm,            # 122:123  (1)
-            vel_b,                     # 123:125  (2)
-            ang_vel_z_norm,            # 125:126  (1)
-            time_enc,                  # 126:134  (8)
-            self._prev_policy_actions,  # 134:136  (2)
+            lidar_norm,
+            goal_dir_b,
+            goal_dist_norm,
+            vel_b,
+            ang_vel_z_norm,
+            time_enc,
+            self._prev_policy_actions,
         ], dim=-1)
         self.goal_heading_sin = goal_dir_b[:, 1]
         assert obs.shape[-1] == cfg.single_obs_dim, \
@@ -1650,8 +1833,13 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         Ray param: sensor + t * (cos θ, sin θ), 求各边的 t
         """
-        cos_a = torch.cos(self._lidar_ray_angles)
-        sin_a = torch.sin(self._lidar_ray_angles)
+        return self._projection_for_sector_angles(self._lidar_ray_angles)
+
+    def _projection_for_sector_angles(self, angles: torch.Tensor) -> torch.Tensor:
+        """Distance from the LiDAR origin to the footprint along ``angles``."""
+
+        cos_a = torch.cos(angles)
+        sin_a = torch.sin(angles)
 
         hl = self.cfg.robot_half_length    # 0.4115
         hw = self.cfg.robot_half_width     # 0.266
@@ -1702,7 +1890,17 @@ class EmmaObsNavEnv(DirectRLEnv):
             ).float().mean()
             log["Episode/goal_rate"] = self._termination_rates["goal"]
             log["Episode/success_rate"] = self._termination_rates["goal"]
+            log["Episode/clean_goal_rate"] = self._termination_rates["clean_goal"]
+            log["Episode/goal_with_collision_rate"] = self._termination_rates[
+                "goal_with_collision"
+            ]
             log["Episode/collision_rate"] = self._termination_rates["collision"]
+            log["Episode/had_collision_rate"] = self._termination_rates[
+                "had_collision"
+            ]
+            log["Episode/collision_events_mean"] = self._termination_rates[
+                "collision_events_mean"
+            ]
             log["Episode/drift_rate"] = self._termination_rates["drift"]
             log["Episode/timeout_rate"] = self._termination_rates["timeout"]
             log["Episode/fell_rate"] = self._termination_rates["fell"]
@@ -1714,6 +1912,14 @@ class EmmaObsNavEnv(DirectRLEnv):
             )
             log["Safety/forward_clearance_mean"] = (
                 self._safety_forward_clearance.mean()
+            )
+            log["Collision/current_rate"] = self._collision_mask.float().mean()
+            log["Collision/event_rate"] = self._collision_event_mask.float().mean()
+            log["Collision/terminal_rate"] = (
+                self._collision_terminal_mask.float().mean()
+            )
+            log["Collision/contact_duration_mean_s"] = (
+                self._collision_contact_duration_s.mean()
             )
             for name, term in self._reward_terms.items():
                 log[f"Reward/{name}_mean"] = term.mean()
@@ -1731,6 +1937,19 @@ class EmmaObsNavEnv(DirectRLEnv):
             ).float().mean()
             log["Navigation/goal_distance_mean"] = self._last_goal_distance.mean()
             log["Navigation/minimum_clearance_mean"] = self._safety_clearance.amin(dim=-1).mean()
+            reference_mask = self._reference_valid.to(
+                self._last_reference_cross_track.dtype
+            )
+            reference_count = reference_mask.sum().clamp_min(1.0)
+            log["Reference/active_fraction"] = reference_mask.mean()
+            log["Reference/cross_track_mean"] = (
+                self._last_reference_cross_track * reference_mask
+            ).sum() / reference_count
+            log["Reference/progress_mean"] = (
+                self._reference_direction
+                * self._last_reference_progress
+                * reference_mask
+            ).sum() / reference_count
             log["Motion/forward_speed_mean"] = self._last_forward_speed.mean()
             log["Motion/reverse_rate"] = (self._last_forward_speed < -0.02).float().mean()
             log["Motion/abs_angular_speed_mean"] = self._last_angular_speed.abs().mean()
@@ -1763,6 +1982,56 @@ class EmmaObsNavEnv(DirectRLEnv):
             action_change_scale=cfg.nav_action_change_scale,
             goal_bonus=cfg.goal_reach_bonus,
             failure_penalty=cfg.nav_failure_penalty,
+        )
+        if cfg.reference_path_reward_enabled:
+            local_position = (
+                robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
+            )
+            reference_progress, cross_track = project_points_to_polylines(
+                local_position,
+                self._reference_waypoints,
+                self._reference_point_counts,
+            )
+            progress_delta = self._reference_direction * (
+                reference_progress - self._prev_reference_progress
+            )
+            progress_delta = progress_delta.clamp(
+                -cfg.reference_path_max_progress_per_step,
+                cfg.reference_path_max_progress_per_step,
+            )
+            path_progress_reward = (
+                cfg.reference_path_progress_per_meter * progress_delta
+            )
+            path_progress_reward = torch.where(
+                self._failure_mask | ~torch.isfinite(path_progress_reward),
+                torch.zeros_like(path_progress_reward),
+                path_progress_reward,
+            )
+            self._reward_terms["progress"] = torch.where(
+                self._reference_valid,
+                path_progress_reward,
+                self._reward_terms["progress"],
+            )
+            cross_track_excess = (
+                (cross_track - cfg.reference_path_cross_track_tolerance).clamp_min(0.0)
+                / (
+                    cfg.reference_path_cross_track_full_cost_error
+                    - cfg.reference_path_cross_track_tolerance
+                )
+            ).clamp_max(1.0)
+            self._reward_terms["reference_cross_track"] = torch.where(
+                self._reference_valid,
+                -cfg.reference_path_cross_track_cost_per_second
+                * self.step_dt
+                * cross_track_excess.square(),
+                torch.zeros_like(cross_track),
+            )
+            self._prev_reference_progress.copy_(reference_progress.detach())
+            self._last_reference_progress = reference_progress.detach()
+            self._last_reference_cross_track = cross_track.detach()
+        self._reward_terms["collision_event"] = (
+            self._nonterminal_collision_event_mask.to(goal_distance.dtype)
+            * cfg.nonterminal_collision_event_penalty
         )
         self._prev_goal_dist.copy_(goal_distance.detach())
         self._prev_policy_actions.copy_(self._policy_actions.detach())
@@ -1807,18 +2076,54 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         goal_dist = torch.linalg.norm(
             self.goal_pos_xy - robot.data.root_pos_w[:, :2], dim=-1)
-        collision = self._collision_mask
-        self._failure_mask = collision | fell | drifted | self._terminated
+        minimum_clearance = self._safety_clearance.amin(dim=-1)
+        task_levels = self._episode_task_level.clamp(
+            0, self._collision_termination_by_level.numel() - 1
+        )
+        collision_state = collision_curriculum_step(
+            minimum_clearance,
+            self._collision_contact_active,
+            self._collision_contact_duration_s,
+            self._episode_collision_events,
+            self._collision_termination_by_level[task_levels],
+            self._collision_budget_by_level[task_levels],
+            step_dt=self.step_dt,
+            collision_clearance=cfg.collision_clearance_threshold,
+            release_clearance=cfg.collision_release_clearance,
+            severe_clearance=cfg.severe_collision_clearance,
+            max_continuous_collision_time_s=(
+                cfg.max_continuous_collision_time_s
+            ),
+        )
+        collision = collision_state["collision"]
+        collision_terminal = collision_state["terminal_collision"]
+        self._collision_event_mask = collision_state["collision_event"]
+        self._nonterminal_collision_event_mask = collision_state[
+            "nonterminal_collision_event"
+        ]
+        self._collision_terminal_mask = collision_terminal
+        self._collision_contact_active = collision_state["contact_active"]
+        self._collision_contact_duration_s = collision_state[
+            "contact_duration_s"
+        ]
+        self._episode_collision_events = collision_state["episode_event_count"]
+        self._episode_had_collision |= self._collision_event_mask
+
+        self._failure_mask = (
+            collision_terminal | fell | drifted | self._terminated
+        )
         goal_reached = (goal_dist < cfg.goal_reach_dist) & ~self._failure_mask
         self._goal_reached_mask = goal_reached
 
         terminated = self._failure_mask | goal_reached
         truncated = time_out & (~terminated)
 
-        self._term_reason[collision] = 4
+        self._term_reason[collision_terminal] = 4
         self._term_reason[goal_reached] = 5
-        self._term_reason[fell & ~collision & ~goal_reached] = 2
-        self._term_reason[drifted & ~collision & ~goal_reached & ~fell] = 3
+        self._term_reason[fell & ~collision_terminal & ~goal_reached] = 2
+        self._term_reason[
+            drifted & ~collision_terminal & ~goal_reached & ~fell
+        ] = 3
         self._term_reason[truncated] = 1
 
         # Preserve current and terminal evaluation values before DirectRLEnv
@@ -1845,8 +2150,20 @@ class EmmaObsNavEnv(DirectRLEnv):
             "truncated": truncated.detach().clone(),
             "ended": ending.detach().clone(),
             "termination_reason": self._term_reason.detach().clone(),
-            "collision": collision.detach().clone(),
+            # Backward-compatible episode-level collision flag. A successful
+            # episode that touched a wall is therefore distinguishable from a
+            # clean success even when contact ended before reaching the goal.
+            "collision": self._episode_had_collision.detach().clone(),
+            "collision_current": collision.detach().clone(),
+            "collision_terminal": collision_terminal.detach().clone(),
+            "collision_event": self._collision_event_mask.detach().clone(),
+            "collision_event_count": (
+                self._episode_collision_events.detach().clone()
+            ),
             "goal_reached": goal_reached.detach().clone(),
+            "clean_goal_reached": (
+                goal_reached & ~self._episode_had_collision
+            ).detach().clone(),
             "fell": fell.detach().clone(),
             "drifted": drifted.detach().clone(),
             "timeout": truncated.detach().clone(),
@@ -1888,10 +2205,34 @@ class EmmaObsNavEnv(DirectRLEnv):
                 ended_reasons.append(int(r))
 
             self._termination_reason_window.extend(ended_reasons)
+            self._episode_collision_window.extend(
+                (
+                    reason,
+                    bool(self._episode_had_collision[end_idx].item()),
+                    int(self._episode_collision_events[end_idx].item()),
+                )
+                for reason, end_idx in zip(ended_reasons, ended_indices)
+            )
             window_counts = Counter(self._termination_reason_window)
             window_total = len(self._termination_reason_window)
             self._termination_rates["goal"] = window_counts[5] / window_total
+            self._termination_rates["clean_goal"] = sum(
+                reason == 5 and not had_collision
+                for reason, had_collision, _ in self._episode_collision_window
+            ) / window_total
+            self._termination_rates["goal_with_collision"] = sum(
+                reason == 5 and had_collision
+                for reason, had_collision, _ in self._episode_collision_window
+            ) / window_total
             self._termination_rates["collision"] = window_counts[4] / window_total
+            self._termination_rates["had_collision"] = sum(
+                had_collision
+                for _, had_collision, _ in self._episode_collision_window
+            ) / window_total
+            self._termination_rates["collision_events_mean"] = sum(
+                event_count
+                for _, _, event_count in self._episode_collision_window
+            ) / window_total
             self._termination_rates["drift"] = window_counts[3] / window_total
             self._termination_rates["timeout"] = window_counts[1] / window_total
             self._termination_rates["fell"] = window_counts[2] / window_total
@@ -2046,6 +2387,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         # ---- 3. 目标点 ----
         self.goal_pos_xy[env_ids] = goal_local + env_origins_xy
         self._update_goal_marker(env_ids)
+        self._reset_reference_paths(env_ids, emma_local, goal_local)
 
         # ---- 4. 重置跟踪状态 ----
         ICR_pos_w = self.robot.data.root_pos_w
@@ -2073,6 +2415,13 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._safety_intervened[env_ids] = False
         self._safety_emergency_stopped[env_ids] = False
         self._collision_mask[env_ids] = False
+        self._collision_event_mask[env_ids] = False
+        self._nonterminal_collision_event_mask[env_ids] = False
+        self._collision_terminal_mask[env_ids] = False
+        self._collision_contact_active[env_ids] = False
+        self._collision_contact_duration_s[env_ids] = 0.0
+        self._episode_collision_events[env_ids] = 0
+        self._episode_had_collision[env_ids] = False
         self._failure_mask[env_ids] = False
         self._goal_reached_mask[env_ids] = False
         self._safety_clearance[env_ids] = self.cfg.lidar_max_distance
@@ -2110,6 +2459,48 @@ class EmmaObsNavEnv(DirectRLEnv):
                           f"z={self.robot.data.root_pos_w[env_i, 2]:.3f} "
                           f"goal_dist={self._prev_goal_dist[env_i]:.2f}")
                 self._spawn_diag_count += 1
+
+    def _reset_reference_paths(
+        self,
+        env_ids: torch.Tensor,
+        start_local: torch.Tensor,
+        goal_local: torch.Tensor,
+    ) -> None:
+        """Install privileged detour routes for newly reset environments."""
+        self._reference_waypoints[env_ids] = 0.0
+        self._reference_point_counts[env_ids] = 0
+        self._reference_valid[env_ids] = False
+        self._reference_direction[env_ids] = 1.0
+        self._prev_reference_progress[env_ids] = 0.0
+        self._last_reference_progress[env_ids] = 0.0
+        self._last_reference_cross_track[env_ids] = 0.0
+        if (
+            not self.cfg.reference_path_reward_enabled
+            or self._world_mode != "random_obstacles"
+            or not hasattr(self._world_manager, "reference_routes")
+        ):
+            return
+
+        routes, point_counts, valid = self._world_manager.reference_routes(
+            env_ids,
+            self._episode_task_level[env_ids],
+            max_waypoints=self._reference_waypoints.shape[1],
+        )
+        self._reference_waypoints[env_ids] = routes
+        self._reference_point_counts[env_ids] = point_counts
+        self._reference_valid[env_ids] = valid
+        direction = torch.where(
+            goal_local[:, 1] >= start_local[:, 1],
+            torch.ones_like(goal_local[:, 1]),
+            -torch.ones_like(goal_local[:, 1]),
+        )
+        self._reference_direction[env_ids] = direction
+        progress, cross_track = project_points_to_polylines(
+            start_local, routes, point_counts
+        )
+        self._prev_reference_progress[env_ids] = progress
+        self._last_reference_progress[env_ids] = progress
+        self._last_reference_cross_track[env_ids] = cross_track
 
     def _update_goal_marker(self, env_ids: torch.Tensor) -> None:
         n = len(env_ids)

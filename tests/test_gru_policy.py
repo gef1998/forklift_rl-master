@@ -29,10 +29,10 @@ spec.loader.exec_module(integration)
 OBS_DIM = 136
 
 
-def model(num_envs=3, length=8):
+def model(num_envs=3, length=8, obs_dim=OBS_DIM):
     torch.manual_seed(18)
     m = network.EmmaNavGRU(
-        Box(-10, 10, (OBS_DIM,)), None, Box(-1, 1, (2,)),
+        Box(-10, 10, (obs_dim,)), None, Box(-1, 1, (2,)),
         {"policy": {"min_concentration": 1., "initial_concentration": 2., "action_eps": 1e-6},
          "value": {"clip_actions": False},
          "recurrent": {"hidden_size": 16, "num_layers": 1, "sequence_length": length, "num_envs": num_envs}},
@@ -58,6 +58,16 @@ def agent(num_envs=3, length=4):
 
 
 class GRUPolicyTests(unittest.TestCase):
+    def test_hybrid_180_observation_dimension_builds_and_runs(self):
+        m = model(obs_dim=196)
+        actions, outputs = m.act(
+            {"observations": torch.randn(3, 196)}, "policy"
+        )
+        values, _ = m.compute({"observations": torch.randn(3, 196)}, "value")
+        self.assertEqual(actions.shape, (3, 2))
+        self.assertEqual(values.shape, (3, 1))
+        self.assertEqual(outputs["rnn"][0].shape, (1, 3, 16))
+
     def test_history_changes_policy_and_value_for_same_current_observation(self):
         m = model()
         obs = torch.randn(3, OBS_DIM)

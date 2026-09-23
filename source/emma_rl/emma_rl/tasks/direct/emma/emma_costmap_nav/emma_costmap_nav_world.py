@@ -103,7 +103,7 @@ def spawn_nav_obstacles(cfg: NavWorldConfig):
                 disable_gravity=True,
                 kinematic_enabled=True,
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.45, 0.35, 0.25),  # 棕色 — 模拟货架/墙壁
             ),
@@ -128,7 +128,7 @@ def spawn_nav_obstacles(cfg: NavWorldConfig):
                 disable_gravity=True,
                 kinematic_enabled=True,
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.55, 0.45, 0.35),  # 浅棕色
             ),
@@ -153,7 +153,7 @@ def spawn_nav_obstacles(cfg: NavWorldConfig):
                 disable_gravity=True,
                 kinematic_enabled=True,
             ),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
+            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=False),
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.8, 0.3, 0.2),  # 红色 — 动态障碍物醒目
             ),

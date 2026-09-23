@@ -84,12 +84,12 @@ class RandomObstacleWorldConfig:
     dedicated_detour_curriculum_passage_width_ranges: tuple[
         tuple[float, float], ...
     ] = (
-        (1.10, 1.55),
-        (1.10, 1.55),
-        (0.85, 1.30),
-        (0.85, 1.30),
-        (0.60, 1.00),
-        (0.60, 1.00),
+            (2.0, 2.5),
+            (1.6, 2.2),
+            (1.6, 1.9),
+            (1.3, 1.7),
+            (1.0, 1.5),
+            (0.7, 1.2),
     )
     dedicated_detour_passage_width_samples_per_level: int = 3
     dedicated_detour_barrier_count_range: tuple[int, int] = (3, 3)
@@ -663,6 +663,57 @@ class RandomObstacleWorldManager:
             min_goal_distance=self.cfg.goal_min_distance,
             candidate_pool_size=self.cfg.spawn_candidate_count,
         )
+
+    def reference_routes(
+        self,
+        env_ids: torch.Tensor,
+        task_levels: torch.Tensor,
+        *,
+        max_waypoints: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return padded local-frame routes for dedicated detour environments.
+
+        General procedural layouts do not yet expose reference paths. Their rows
+        remain invalid, so the standard goal-distance reward is retained.
+        """
+        count = env_ids.numel()
+        routes = torch.zeros(
+            count, max_waypoints, 2,
+            device=self.device, dtype=self.positions.dtype,
+        )
+        point_counts = torch.zeros(
+            count, device=self.device, dtype=torch.long,
+        )
+        valid = torch.zeros(count, device=self.device, dtype=torch.bool)
+        if not self.dedicated_detour_layouts:
+            return routes, point_counts, valid
+
+        dedicated_rows = torch.where(
+            env_ids >= self.dedicated_detour_start
+        )[0]
+        for row in dedicated_rows.cpu().tolist():
+            env_index = int(env_ids[row].item())
+            layout = self.dedicated_detour_layouts.get(env_index)
+            if layout is None:
+                continue
+            level = min(
+                max(int(task_levels[row].item()), 0),
+                len(layout["curriculum_lane_ids"]) - 1,
+            )
+            lane = int(layout["curriculum_lane_ids"][level])
+            route = layout["route_waypoints"][lane]
+            route_count = int(route.shape[0])
+            if route_count > max_waypoints:
+                raise RuntimeError(
+                    f"reference route needs {route_count} waypoints, "
+                    f"buffer provides {max_waypoints}"
+                )
+            routes[row, :route_count] = torch.as_tensor(
+                route, device=self.device, dtype=routes.dtype,
+            )
+            point_counts[row] = route_count
+            valid[row] = True
+        return routes, point_counts, valid
 
     def build_warp_mesh(self, env_origins: torch.Tensor, device: str):
         """构建地面、外墙及每环境随机混合障碍的 LiDAR mesh。"""

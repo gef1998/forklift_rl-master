@@ -45,6 +45,7 @@ EPISODE_FIELDS = (
     "trial",
     "seed",
     "success",
+    "clean_success",
     "termination_reason",
     "termination_reason_code",
     "steps",
@@ -58,6 +59,8 @@ EPISODE_FIELDS = (
     "mean_abs_angular_speed_radps",
     "max_abs_angular_speed_radps",
     "collision",
+    "collision_terminal",
+    "collision_events",
     "goal_reached",
     "timeout",
     "fell",
@@ -599,6 +602,7 @@ def _worker(args: argparse.Namespace) -> int:
                     "trial": trial,
                     "seed": trial_seed,
                     "success": success,
+                    "clean_success": success and not bool(terminal["collision"]),
                     "termination_reason": reason,
                     "termination_reason_code": reason_code,
                     "steps": int(terminal["episode_steps"]),
@@ -612,6 +616,12 @@ def _worker(args: argparse.Namespace) -> int:
                     "mean_abs_angular_speed_radps": sum(angular_speeds) / len(angular_speeds),
                     "max_abs_angular_speed_radps": max(angular_speeds),
                     "collision": bool(terminal["collision"]),
+                    "collision_terminal": bool(
+                        terminal.get("collision_terminal", False)
+                    ),
+                    "collision_events": int(
+                        terminal.get("collision_event_count", 0)
+                    ),
                     "goal_reached": bool(terminal["goal_reached"]),
                     "timeout": bool(terminal["timeout"]),
                     "fell": bool(terminal["fell"]),

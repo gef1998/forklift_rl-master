@@ -183,6 +183,97 @@ def min_pool_clearance_rays(
     return selected_ranges, selected_angles, selected_clearance
 
 
+def min_pool_clearance_rays_grouped(
+    ranges: torch.Tensor,
+    ray_angles: torch.Tensor,
+    footprint_projection: torch.Tensor,
+    sector_groups: tuple[tuple[int, int], ...] | list[tuple[int, int]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Min-pool consecutive rays with piecewise-constant sector widths.
+
+    Each ``(sector_count, rays_per_sector)`` group describes a contiguous
+    angular region. This keeps the fast reshape/gather implementation used by
+    uniform sectors while allowing the policy to use finer front sectors.
+    """
+
+    if ranges.shape != ray_angles.shape or ranges.shape != footprint_projection.shape:
+        raise ValueError(
+            "ranges, ray_angles, and footprint_projection must have identical shapes"
+        )
+    if not sector_groups:
+        raise ValueError("sector_groups must not be empty")
+    expected_rays = sum(
+        int(sector_count) * int(rays_per_sector)
+        for sector_count, rays_per_sector in sector_groups
+    )
+    if expected_rays != ranges.shape[1]:
+        raise ValueError(
+            f"sector_groups describe {expected_rays} rays, got {ranges.shape[1]}"
+        )
+
+    range_parts: list[torch.Tensor] = []
+    angle_parts: list[torch.Tensor] = []
+    clearance_parts: list[torch.Tensor] = []
+    ray_offset = 0
+    for sector_count, rays_per_sector in sector_groups:
+        if sector_count < 1 or rays_per_sector < 1:
+            raise ValueError("sector counts and rays per sector must be positive")
+        ray_count = sector_count * rays_per_sector
+        group_slice = slice(ray_offset, ray_offset + ray_count)
+        grouped_ranges = ranges[:, group_slice].reshape(
+            ranges.shape[0], sector_count, rays_per_sector
+        )
+        grouped_angles = ray_angles[:, group_slice].reshape(
+            ranges.shape[0], sector_count, rays_per_sector
+        )
+        grouped_projection = footprint_projection[:, group_slice].reshape(
+            ranges.shape[0], sector_count, rays_per_sector
+        )
+        grouped_clearance = grouped_ranges - grouped_projection
+        indices = grouped_clearance.argmin(dim=-1, keepdim=True)
+        range_parts.append(torch.gather(grouped_ranges, -1, indices).squeeze(-1))
+        angle_parts.append(torch.gather(grouped_angles, -1, indices).squeeze(-1))
+        clearance_parts.append(
+            torch.gather(grouped_clearance, -1, indices).squeeze(-1)
+        )
+        ray_offset += ray_count
+
+    return (
+        torch.cat(range_parts, dim=-1),
+        torch.cat(angle_parts, dim=-1),
+        torch.cat(clearance_parts, dim=-1),
+    )
+
+
+def hybrid_180_sector_edges(
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Return edges for 1-degree front and 3-degree elsewhere (180 sectors)."""
+
+    degree_edges = torch.cat(
+        (
+            torch.arange(0.0, 46.0, 1.0, device=device, dtype=dtype),
+            torch.arange(48.0, 316.0, 3.0, device=device, dtype=dtype),
+            torch.arange(316.0, 361.0, 1.0, device=device, dtype=dtype),
+        )
+    )
+    if degree_edges.numel() != 181:
+        raise RuntimeError("hybrid LiDAR layout must contain 180 sectors")
+    return torch.deg2rad(degree_edges)
+
+
+def sector_centers_from_edges(sector_edges: torch.Tensor) -> torch.Tensor:
+    """Return angular centers for monotonically increasing [0, 2pi] edges."""
+
+    if sector_edges.ndim != 1 or sector_edges.numel() < 2:
+        raise ValueError("sector_edges must be a one-dimensional edge vector")
+    if torch.any(sector_edges[1:] <= sector_edges[:-1]):
+        raise ValueError("sector_edges must be strictly increasing")
+    return (sector_edges[:-1] + sector_edges[1:]) * 0.5
+
+
 def transform_points_se2(
     points_source: torch.Tensor,
     source_pose: torch.Tensor,
@@ -276,6 +367,7 @@ def points_to_ranges_and_clearances(
     sensor_offset_x: float,
     sensor_offset_y: float,
     valid_mask: torch.Tensor | None = None,
+    sector_edges: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Project points and aggregate range and footprint clearance per sector.
 
@@ -287,16 +379,27 @@ def points_to_ranges_and_clearances(
     point_ranges = torch.linalg.norm(points, dim=-1)
     point_angles = torch.remainder(
         torch.atan2(points[..., 1], points[..., 0]), 2.0 * math.pi)
-    sector_width = 2.0 * math.pi / num_sectors
-    indices = torch.floor(point_angles / sector_width).long().clamp_(0, num_sectors - 1)
+    if sector_edges is None:
+        sector_width = 2.0 * math.pi / num_sectors
+        indices = torch.floor(point_angles / sector_width).long().clamp_(
+            0, num_sectors - 1
+        )
+        sector_centers = (
+            torch.arange(num_sectors, device=points.device, dtype=points.dtype) + 0.5
+        ) * sector_width
+    else:
+        sector_edges = sector_edges.to(device=points.device, dtype=points.dtype)
+        if sector_edges.ndim != 1 or sector_edges.numel() != num_sectors + 1:
+            raise ValueError("sector_edges must contain num_sectors + 1 values")
+        indices = torch.bucketize(
+            point_angles.contiguous(), sector_edges[1:-1].contiguous(), right=True
+        ).clamp_(0, num_sectors - 1)
+        sector_centers = (sector_edges[:-1] + sector_edges[1:]) * 0.5
 
     valid = (point_ranges > 1.0e-6) & (point_ranges < max_range)
     if valid_mask is not None:
         valid &= valid_mask
 
-    sector_centers = (
-        torch.arange(num_sectors, device=points.device, dtype=points.dtype) + 0.5
-    ) * sector_width
     default_clearance = max_range - rectangular_footprint_projection(
         sector_centers,
         half_length,
@@ -357,6 +460,7 @@ def warp_cached_ranges_and_clearances(
     half_width: float,
     sensor_offset_x: float,
     sensor_offset_y: float,
+    sector_edges: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Warp cached scan endpoints and aggregate current-frame clearances."""
 
@@ -372,4 +476,5 @@ def warp_cached_ranges_and_clearances(
         sensor_offset_x,
         sensor_offset_y,
         valid,
+        sector_edges,
     )

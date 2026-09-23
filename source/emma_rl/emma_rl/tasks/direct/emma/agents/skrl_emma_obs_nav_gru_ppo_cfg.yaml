@@ -42,7 +42,7 @@ agent:
   mini_batches: 128
   # At 50 Hz, gamma=0.99 has only about a 2 s horizon. Long detours need
   # future arrival to remain valuable after removing per-step motion bonuses.
-  discount_factor: 0.999
+  discount_factor: 0.99
   gae_lambda: 0.95
   learning_rate: 3.0e-04
   # 固定学习率，避免 KLAdaptiveLR 在低 KL 阶段把实际学习率抬高到 7.6e-4。
