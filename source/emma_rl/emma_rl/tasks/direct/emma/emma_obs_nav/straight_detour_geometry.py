@@ -67,6 +67,7 @@ def sample_straight_detour_layout(
     ),
     passage_width_samples_per_level=3,
     barrier_count_range=(3, 3),
+    route_barrier_crossings=(1, 2, 3),
     barrier_y_span=2.70,
     extra_obstacle_count_range=(3, 6),
     obstacle_wall_clearance=0.10,
@@ -103,6 +104,16 @@ def sample_straight_detour_layout(
         raise ValueError("detour requires lanes and one obstacle per lane")
     if curriculum_levels != 2 * lane_count:
         raise ValueError("six-level detour requires two curriculum levels per lane")
+    crossings = tuple(route_barrier_crossings)
+    if len(crossings) != lane_count:
+        raise ValueError("one route-crossing count per lane is required")
+    if any(not isinstance(value, int) for value in crossings):
+        raise ValueError("route barrier crossings must be integers")
+    if any(not 1 <= value <= 3 for value in crossings):
+        raise ValueError("route barrier crossings must lie between one and three")
+    if any(crossings[index] > crossings[index + 1]
+           for index in range(lane_count - 1)):
+        raise ValueError("route barrier crossings must be non-decreasing across lanes")
     if (not isinstance(passage_width_samples_per_level, int)
             or passage_width_samples_per_level < 1):
         raise ValueError("passage_width_samples_per_level must be positive")
@@ -189,6 +200,7 @@ def sample_straight_detour_layout(
     route_waypoints = []
     gate_centers = []
     curriculum_endpoint_ys = []
+    lane_route_floors = []
     outer_centers = (-arena_size / 2.0 + outer_wall_thickness / 2.0,
                      arena_size / 2.0 - outer_wall_thickness / 2.0)
     for lane in range(lane_count):
@@ -254,13 +266,28 @@ def sample_straight_detour_layout(
         )
         lower_inner_y = ordered_gates[0, 1] + endpoint_guard + endpoint_margin
         upper_inner_y = ordered_gates[2, 1] - endpoint_guard - endpoint_margin
-        if (lower_inner_y >= ordered_gates[1, 1] - gate_guard - endpoint_margin
-                or upper_inner_y <= ordered_gates[1, 1] + gate_guard + endpoint_margin):
+        middle_lower_y = ordered_gates[1, 1] - endpoint_guard - endpoint_margin
+        middle_upper_y = ordered_gates[1, 1] + endpoint_guard + endpoint_margin
+        crossing_count = int(route_barrier_crossings[lane])
+        if crossing_count < 3 and (
+                middle_lower_y <= ordered_gates[0, 1] + gate_guard + endpoint_margin
+                or middle_upper_y >= ordered_gates[2, 1] - gate_guard - endpoint_margin):
             raise ValueError("curriculum routes have no alignment room around middle gate")
-        endpoints = ((-spawn_y, upper_inner_y), (lower_inner_y, spawn_y))
-        if any(top - bottom <= min_goal_distance for bottom, top in endpoints):
+        if crossing_count == 1:
+            # Easiest lane: each level crosses only its own level-specific gate
+            # and stops clear of the shared middle gate's alignment zone.
+            endpoints = ((-spawn_y, middle_lower_y), (middle_upper_y, spawn_y))
+            route_floor = 2.0 * gate_guard + endpoint_guard
+        elif crossing_count == 2:
+            endpoints = ((-spawn_y, upper_inner_y), (lower_inner_y, spawn_y))
+            route_floor = min_goal_distance
+        else:
+            endpoints = ((-spawn_y, spawn_y), (-spawn_y, spawn_y))
+            route_floor = min_goal_distance
+        if any(top - bottom <= route_floor for bottom, top in endpoints):
             raise ValueError("curriculum route violates min_goal_distance")
         curriculum_endpoint_ys.append(endpoints)
+        lane_route_floors.append(route_floor)
 
     positions = np.zeros((radii.size, 2), dtype=np.float64)
     obstacle_active = np.zeros(radii.size, dtype=bool)
@@ -347,10 +374,14 @@ def sample_straight_detour_layout(
             <= min_goal_distance).any():
         raise RuntimeError("dedicated-detour spawn bank violates min_goal_distance")
 
-    # Two levels share each fixed lane but cross different outer gates; both
-    # routes also cross the shared wide middle gate. This provides six real
-    # width distributions without moving geometry between episode resets.
+    # Two levels share each fixed lane; the number of short walls their
+    # certified routes cross grows with the lane (one, two, then all three).
+    # Both levels keep their own level-specific gate on the route, so the six
+    # width distributions survive without moving geometry between resets.
     curriculum_lane_ids = np.arange(curriculum_levels, dtype=np.int64) // 2
+    curriculum_route_floors = np.asarray(
+        lane_route_floors, dtype=np.float64
+    )[curriculum_lane_ids]
     curriculum_passage_widths = np.empty(curriculum_levels, dtype=np.float64)
     curriculum_pairs = np.empty(
         (curriculum_levels, spawn_bank_size, 2, 2), dtype=np.float64
@@ -368,9 +399,10 @@ def sample_straight_detour_layout(
         curriculum_passage_widths[level] = passage_widths[lane][
             0 if level % 2 == 0 else 2
         ]
-    if (np.linalg.norm(
-            curriculum_pairs[:, :, 1] - curriculum_pairs[:, :, 0], axis=-1
-            ) <= min_goal_distance).any():
+    pair_lengths = np.linalg.norm(
+        curriculum_pairs[:, :, 1] - curriculum_pairs[:, :, 0], axis=-1
+    )
+    if (pair_lengths <= curriculum_route_floors[:, None]).any():
         raise RuntimeError(
             "dedicated-detour curriculum bank violates min_goal_distance"
         )
@@ -387,6 +419,7 @@ def sample_straight_detour_layout(
         "curriculum_lane_ids": curriculum_lane_ids,
         "curriculum_spawn_lane_ids": curriculum_spawn_lane_ids,
         "curriculum_passage_widths": curriculum_passage_widths,
+        "curriculum_route_floors": curriculum_route_floors,
         "curriculum_endpoint_ys": np.asarray(curriculum_endpoint_ys),
         "passage_widths": tuple(passage_widths),
         "barrier_counts": barrier_counts,

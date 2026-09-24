@@ -309,8 +309,10 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         dedicated_detour_env_count=128,
         dedicated_detour_lane_count=3,
         # 0.55 m 车宽在 0.60 m 净宽中每侧余量约 0.025 m；门洞按车体横向尺寸校验。
-        # 每个课程等级独立配置门洞净宽。相邻两个等级使用同一条线路的
-        # 前半程/后半程，且都跨越两道短墙；其他场景参数暂不参与课程。
+        # 每个课程等级独立配置门洞净宽。相邻两个等级共用同一条线路，但需要
+        # 绕过的短墙数按线路递增：0-1 级各绕 1 道（各自的上门/下门），
+        # 2-3 级各绕 2 道（自门外加共用中门），4-5 级贯通全程绕全部 3 道；
+        # 其他场景参数暂不参与课程。
         dedicated_detour_curriculum_passage_width_ranges=(
             (2.0, 2.5),
             (1.6, 2.2),
@@ -320,6 +322,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
             (0.7, 1.2),
         ),
         dedicated_detour_barrier_count_range=(3, 3),
+        dedicated_detour_route_barrier_crossings=(1, 2, 3),
         dedicated_detour_barrier_y_span=2.70,
         dedicated_detour_extra_obstacle_count_range=(3, 6),
         dedicated_detour_obstacle_wall_clearance=0.10,

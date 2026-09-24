@@ -93,6 +93,10 @@ class RandomObstacleWorldConfig:
     )
     dedicated_detour_passage_width_samples_per_level: int = 3
     dedicated_detour_barrier_count_range: tuple[int, int] = (3, 3)
+    # Number of short walls each level's certified route must negotiate, one
+    # entry per lane (levels 2*lane and 2*lane+1 share the lane): the easiest
+    # lane crosses only its own level-specific gate, the hardest crosses all.
+    dedicated_detour_route_barrier_crossings: tuple[int, ...] = (1, 2, 3)
     dedicated_detour_barrier_y_span: float = 2.70
     dedicated_detour_extra_obstacle_count_range: tuple[int, int] = (3, 6)
     dedicated_detour_obstacle_wall_clearance: float = 0.10
@@ -187,6 +191,21 @@ class RandomObstacleWorldConfig:
         if self.dedicated_detour_barrier_count_range != (3, 3):
             raise ValueError(
                 "six-level dedicated curriculum requires exactly three barriers per lane"
+            )
+        crossings = self.dedicated_detour_route_barrier_crossings
+        if len(crossings) != self.dedicated_detour_lane_count:
+            raise ValueError(
+                "dedicated detour requires one route-crossing count per lane"
+            )
+        if any(not isinstance(value, int) or not 1 <= value <= 3
+               for value in crossings):
+            raise ValueError(
+                "dedicated detour route crossings must be integers in 1..3"
+            )
+        if any(crossings[index] > crossings[index + 1]
+               for index in range(len(crossings) - 1)):
+            raise ValueError(
+                "dedicated detour route crossings must be non-decreasing across lanes"
             )
         patterns = []
         for lane in range(self.dedicated_detour_lane_count):
@@ -533,6 +552,9 @@ class RandomObstacleWorldManager:
                     self.cfg.dedicated_detour_passage_width_samples_per_level
                 ),
                 barrier_count_range=self.cfg.dedicated_detour_barrier_count_range,
+                route_barrier_crossings=(
+                    self.cfg.dedicated_detour_route_barrier_crossings
+                ),
                 barrier_y_span=self.cfg.dedicated_detour_barrier_y_span,
                 extra_obstacle_count_range=(
                     self.cfg.dedicated_detour_extra_obstacle_count_range
@@ -576,6 +598,7 @@ class RandomObstacleWorldManager:
                 f"[DedicatedDetour] env={env_index} "
                 f"lanes={self.cfg.dedicated_detour_lane_count} "
                 f"barriers={layout['barrier_count']} "
+                f"crossings={self.cfg.dedicated_detour_route_barrier_crossings} "
                 f"passages=[{widths}]m obstacles={int(layout['active'].sum())}"
             )
 
