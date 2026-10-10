@@ -20,12 +20,12 @@ spec.loader.exec_module(geometry)
 FULL_LENGTH = (10.0 - 2 * 0.15) / 3
 BASE_WALL_LENGTHS = [FULL_LENGTH] * 12 + [(FULL_LENGTH - 1.5) / 2] * 4
 LEVEL_RANGES = (
-    (2.0, 2.5),
-    (1.6, 2.2),
-    (1.6, 1.9),
-    (1.3, 1.7),
-    (1.0, 1.5),
-    (0.7, 1.2),
+            (1.7, 2.3),
+            (1.6, 2.2),
+            (1.5, 2.1),
+            (1.5, 2.0),
+            (1.4, 1.9),
+            (1.4, 1.8),
 )
 DEDICATED_PATTERNS = []
 WIDTH_SAMPLES = 3

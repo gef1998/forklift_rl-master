@@ -77,33 +77,33 @@ class RandomObstacleWorldConfig:
     # Reserve the final N parallel environments for a sealed straight-line
     # detour task. Geometry is sampled once at startup so the static Warp mesh
     # and PhysX collision geometry remain identical throughout training.
-    dedicated_detour_env_count: int = 128
+    dedicated_detour_env_count: int = 256
     dedicated_detour_lane_count: int = 3
     # One explicit width range per curriculum level, easiest to hardest.
     # Every lane contains two level-specific gates plus one shared wide gate.
     dedicated_detour_curriculum_passage_width_ranges: tuple[
         tuple[float, float], ...
     ] = (
-            (2.0, 2.5),
-            (1.6, 2.2),
-            (1.6, 1.9),
-            (1.3, 1.7),
-            (1.0, 1.5),
-            (0.7, 1.2),
+            (1.8, 2.3),
+            (1.6, 2.1),
+            (1.6, 2.0),
+            (1.4, 1.8),
+            (1.4, 1.8),
+            (1.2, 1.6),
     )
     dedicated_detour_passage_width_samples_per_level: int = 3
     dedicated_detour_barrier_count_range: tuple[int, int] = (3, 3)
     # Number of short walls each level's certified route must negotiate, one
     # entry per lane (levels 2*lane and 2*lane+1 share the lane): the easiest
     # lane crosses only its own level-specific gate, the hardest crosses all.
-    dedicated_detour_route_barrier_crossings: tuple[int, ...] = (1, 2, 3)
-    dedicated_detour_barrier_y_span: float = 2.70
+    dedicated_detour_route_barrier_crossings: tuple[int, ...] = (2, 2, 3)
+    dedicated_detour_barrier_y_span: float = 2.20
     dedicated_detour_extra_obstacle_count_range: tuple[int, int] = (3, 6)
     dedicated_detour_obstacle_wall_clearance: float = 0.10
     dedicated_detour_robot_half_width: float = 0.275
     dedicated_detour_robot_half_length: float = 0.425
     dedicated_detour_collision_clearance: float = 0.01
-    dedicated_detour_spawn_y: float = 3.55
+    dedicated_detour_spawn_y: float = 3.95
     dedicated_detour_spawn_lateral_jitter: float = 0.20
     dedicated_detour_heading_half_angle_deg: float = 15.0
 

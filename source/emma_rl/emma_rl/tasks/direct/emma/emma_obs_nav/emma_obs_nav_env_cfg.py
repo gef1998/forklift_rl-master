@@ -314,22 +314,22 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         # 2-3 级各绕 2 道（自门外加共用中门），4-5 级贯通全程绕全部 3 道；
         # 其他场景参数暂不参与课程。
         dedicated_detour_curriculum_passage_width_ranges=(
-            (2.0, 2.5),
-            (1.6, 2.2),
-            (1.6, 1.9),
-            (1.3, 1.7),
-            (1.0, 1.5),
-            (0.7, 1.2),
+            (1.8, 2.3),
+            (1.6, 2.1),
+            (1.6, 2.0),
+            (1.5, 1.8),
+            (1.4, 1.8),
+            (1.2, 1.5),
         ),
         dedicated_detour_barrier_count_range=(3, 3),
-        dedicated_detour_route_barrier_crossings=(1, 2, 3),
-        dedicated_detour_barrier_y_span=2.70,
+        dedicated_detour_route_barrier_crossings=(2, 2, 3),
+        dedicated_detour_barrier_y_span=2.20,
         dedicated_detour_extra_obstacle_count_range=(3, 6),
         dedicated_detour_obstacle_wall_clearance=0.10,
         dedicated_detour_robot_half_width=0.275,
         dedicated_detour_robot_half_length=0.425,
         dedicated_detour_collision_clearance=0.01,
-        dedicated_detour_spawn_y=3.55,
+        dedicated_detour_spawn_y=3.95,
         dedicated_detour_spawn_lateral_jitter=0.20,
         dedicated_detour_heading_half_angle_deg=15.0,
     )
@@ -498,7 +498,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         False, False, False, False, True, True,
     )
     max_nonterminal_collision_events_by_level: tuple[int, ...] = (
-        10, 8, 4, 2, 0, 0,
+        5, 4, 2, 1, 0, 0,
     )
     nonterminal_collision_event_penalty: float = -4.0
     collision_release_clearance: float = 0.03
@@ -509,19 +509,19 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Signed change in actual goal distance; reward units per metre.
     # Moving away is negative, revisiting the same distance cannot repeatedly
     # collect the old positive-only progress reward (undiscounted transitions).
-    nav_progress_per_meter: float = 7.0
+    nav_progress_per_meter: float = 10.0
     # Dedicated detour scenes have a certified collision-free polyline. Replace
     # Euclidean goal progress there with signed arc-length progress, because a
     # necessary lateral detour may temporarily increase straight-line distance.
     # This privileged signal is never included in policy observations.
     reference_path_reward_enabled: bool = True
-    reference_path_progress_per_meter: float = 5.0
+    reference_path_progress_per_meter: float = 10.0
     reference_path_max_progress_per_step: float = 0.10
     # Keep path following weak: no cost inside the tolerance and a bounded
     # per-second cost outside it, so obstacle avoidance can depart from the line.
-    reference_path_cross_track_tolerance: float = 0.15
-    reference_path_cross_track_full_cost_error: float = 0.50
-    reference_path_cross_track_cost_per_second: float = 0.25
+    reference_path_cross_track_tolerance: float = 0.25
+    reference_path_cross_track_full_cost_error: float = 1.00
+    reference_path_cross_track_cost_per_second: float = 0.05
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
