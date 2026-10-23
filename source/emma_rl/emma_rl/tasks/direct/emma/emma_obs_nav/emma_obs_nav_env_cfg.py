@@ -305,21 +305,21 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         ultra_dense_clutter_influence_radius=0.70,  # 第六级聚焦更局部的拥挤路线
         min_connected_free_fraction=0.60,  # 所有课程端点仍位于最大连通域
         # 4096 并行环境中保留约 3.1% 为封闭直行绕障，避免少量样本被 PPO 批次稀释。
-        # 每个 env 含 3 条独立线路，每线 2~3 个交错短墙并放置 3~6 个散障。
+        # 每个 env 含 3 条独立线路，每线 3 个交错短墙并放置 3~6 个散障。
         dedicated_detour_env_count=128,
         dedicated_detour_lane_count=3,
         # 0.55 m 车宽在 0.60 m 净宽中每侧余量约 0.025 m；门洞按车体横向尺寸校验。
         # 每个课程等级独立配置门洞净宽。相邻两个等级共用同一条线路，但需要
-        # 绕过的短墙数按线路递增：0-1 级各绕 1 道（各自的上门/下门），
-        # 2-3 级各绕 2 道（自门外加共用中门），4-5 级贯通全程绕全部 3 道；
+        # 绕过的短墙数由 dedicated_detour_route_barrier_crossings 控制；
+        # 当前 0-3 级各绕 2 道，4-5 级贯通全程绕全部 3 道；
         # 其他场景参数暂不参与课程。
         dedicated_detour_curriculum_passage_width_ranges=(
             (1.8, 2.3),
-            (1.6, 2.1),
-            (1.6, 2.0),
-            (1.5, 1.8),
-            (1.4, 1.8),
-            (1.2, 1.5),
+            (1.4, 2.1),
+            (1.25, 1.8),
+            (1.1, 1.7),
+            (1.1, 1.6),
+            (0.8, 1.5),
         ),
         dedicated_detour_barrier_count_range=(3, 3),
         dedicated_detour_route_barrier_crossings=(2, 2, 3),
@@ -525,8 +525,8 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.05
-    nav_proximity_cost_per_second: float = 0.
+    nav_clearance_threshold: float = 0.15
+    nav_proximity_cost_per_second: float = 0.075
     nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.

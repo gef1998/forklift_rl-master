@@ -20,31 +20,14 @@ spec.loader.exec_module(geometry)
 FULL_LENGTH = (10.0 - 2 * 0.15) / 3
 BASE_WALL_LENGTHS = [FULL_LENGTH] * 12 + [(FULL_LENGTH - 1.5) / 2] * 4
 LEVEL_RANGES = (
-            (1.7, 2.3),
-            (1.6, 2.2),
-            (1.5, 2.1),
-            (1.5, 2.0),
-            (1.4, 1.9),
-            (1.4, 1.8),
+    (1.8, 2.3),
+    (1.5, 2.1),
+    (1.5, 2.0),
+    (1.2, 1.8),
+    (1.2, 1.6),
+    (0.9, 1.6),
 )
-DEDICATED_PATTERNS = []
-WIDTH_SAMPLES = 3
-for lane in range(3):
-    available = FULL_LENGTH - (.15 / 2 if lane == 1 else 0.0)
-    lower_range = LEVEL_RANGES[2 * lane]
-    upper_range = LEVEL_RANGES[2 * lane + 1]
-    DEDICATED_PATTERNS.extend(
-        available - width
-        for width in np.linspace(*lower_range, WIDTH_SAMPLES)
-    )
-    DEDICATED_PATTERNS.append(
-        available - max(lower_range[1], upper_range[1])
-    )
-    DEDICATED_PATTERNS.extend(
-        available - width
-        for width in np.linspace(*upper_range, WIDTH_SAMPLES)
-    )
-WALL_LENGTHS = np.array(BASE_WALL_LENGTHS + DEDICATED_PATTERNS)
+WALL_LENGTHS = np.array(BASE_WALL_LENGTHS)
 RADII = np.array([0.40 if i % 2 == 0 else math.hypot(.45, .45) / 2
                   for i in range(20)])
 
@@ -55,23 +38,38 @@ class StraightDetourLayoutTests(unittest.TestCase):
         # The function's defaults mirror production passage widths; pass the
         # local LEVEL_RANGES explicitly so the test owns its own geometry.
         cls.layouts = [geometry.sample_straight_detour_layout(
-            RADII, WALL_LENGTHS, curriculum_passage_width_ranges=LEVEL_RANGES,
+            RADII, WALL_LENGTHS,
+            passage_width_range=(0.9, 2.3),
+            curriculum_passage_width_ranges=LEVEL_RANGES,
+            route_barrier_crossings=(2, 2, 3),
             seed=seed) for seed in range(96)]
 
     def test_seed_reproducibility_and_randomized_difficulty(self):
         first = geometry.sample_straight_detour_layout(
-            RADII, WALL_LENGTHS, curriculum_passage_width_ranges=LEVEL_RANGES,
+            RADII, WALL_LENGTHS,
+            passage_width_range=(0.9, 2.3),
+            curriculum_passage_width_ranges=LEVEL_RANGES,
+            route_barrier_crossings=(2, 2, 3),
             seed=0)
-        for name in ("positions", "active", "yaws", "wall_poses",
-                     "wall_active", "spawn_pairs", "barrier_counts"):
+        for name in (
+            "positions", "active", "yaws", "wall_poses", "wall_active",
+            "barrier_poses", "barrier_lengths", "spawn_pairs",
+            "barrier_counts",
+        ):
             np.testing.assert_array_equal(first[name], self.layouts[0][name])
         widths = np.concatenate([
             layout["curriculum_passage_widths"] for layout in self.layouts
         ])
-        self.assertGreater(np.ptp(widths), .85)
-        self.assertTrue(((.60 - 1e-6 <= widths)
-                         & (widths <= 1.55 + 1e-6)).all())
-        self.assertLessEqual(widths.min(), .61)
+        self.assertGreater(np.ptp(widths), 1.2)
+        self.assertTrue(((0.9 - 1e-6 <= widths)
+                         & (widths <= 2.3 + 1e-6)).all())
+        # Continuous sampling must not collapse back to a short linspace grid.
+        for level in range(len(LEVEL_RANGES)):
+            level_widths = np.array([
+                layout["curriculum_passage_widths"][level]
+                for layout in self.layouts
+            ])
+            self.assertGreater(len(np.unique(np.round(level_widths, 5))), 40)
         self.assertGreaterEqual(
             (widths / 2).min(),
             self.layouts[0]["minimum_gate_clearance"] - 1e-6,
@@ -82,9 +80,9 @@ class StraightDetourLayoutTests(unittest.TestCase):
     def test_passage_width_is_the_only_dedicated_curriculum_variable(self):
         expected_level_lanes = np.array((0, 0, 1, 1, 2, 2))
         # lane -> (even-level crossed gates, odd-level crossed gates): the
-        # certified routes cross one, two, then all three walls per lane.
+        # first two lanes cross two walls and the final lane crosses all three.
         expected_crossed = {
-            0: ((0,), (2,)),
+            0: ((0, 1), (1, 2)),
             1: ((0, 1), (1, 2)),
             2: ((0, 1, 2), (0, 1, 2)),
         }
@@ -118,6 +116,10 @@ class StraightDetourLayoutTests(unittest.TestCase):
         expected_dividers = np.linspace(-inner_half, inner_half, 4)[1:-1]
         for layout in self.layouts:
             poses = layout["wall_poses"]
+            self.assertEqual(poses.shape, (16, 3))
+            self.assertEqual(layout["barrier_poses"].shape, (9, 3))
+            self.assertEqual(layout["barrier_lengths"].shape, (9,))
+            self.assertEqual(layout["collision_wall_poses"].shape, (25, 3))
             self.assertEqual(len(layout["route_waypoints"]), 3)
             self.assertTrue((layout["barrier_counts"] == 3).all())
             for divider, x in enumerate(expected_dividers):
@@ -140,8 +142,10 @@ class StraightDetourLayoutTests(unittest.TestCase):
                 samples = np.concatenate(samples)
                 clearance = np.array([geometry._point_clearance(
                     point, layout["positions"], RADII, layout["active"],
-                    layout["wall_poses"], layout["wall_active"],
-                    WALL_LENGTHS, .15, inner_half) for point in samples])
+                    layout["collision_wall_poses"],
+                    layout["collision_wall_active"],
+                    layout["collision_wall_lengths"], .15, inner_half)
+                    for point in samples])
                 minimum_index = int(clearance.argmin())
                 self.assertGreaterEqual(
                     clearance[minimum_index],
@@ -165,7 +169,7 @@ class StraightDetourLayoutTests(unittest.TestCase):
             self.assertEqual(pairs.shape, (7, 128, 2, 2))
             self.assertEqual(set(layout["spawn_lane_ids"]), {0, 1, 2})
             # Full-lane spawn bank rows keep the global goal distance floor;
-            # one-gate curriculum rows only need room to align around their gate.
+            # partial curriculum rows only need room to align around their gates.
             length_floors = np.concatenate((
                 (5.20,), layout["curriculum_route_floors"]
             ))
@@ -174,8 +178,9 @@ class StraightDetourLayoutTests(unittest.TestCase):
             self.assertTrue((pair_lengths > length_floors[:, None]).all())
             endpoint_clearance = np.array([geometry._point_clearance(
                 point, layout["positions"], RADII, layout["active"],
-                layout["wall_poses"], layout["wall_active"],
-                WALL_LENGTHS, .15, inner_half)
+                layout["collision_wall_poses"],
+                layout["collision_wall_active"],
+                layout["collision_wall_lengths"], .15, inner_half)
                 for point in pairs.reshape(-1, 2)])
             self.assertGreaterEqual(endpoint_clearance.min(), .70 - 1e-6)
 
@@ -197,8 +202,9 @@ class StraightDetourLayoutTests(unittest.TestCase):
                 other_active[index] = False
                 clearance = geometry._point_clearance(
                     point, layout["positions"], RADII, other_active,
-                    layout["wall_poses"], layout["wall_active"], WALL_LENGTHS,
-                    .15, inner_half)
+                    layout["collision_wall_poses"],
+                    layout["collision_wall_active"],
+                    layout["collision_wall_lengths"], .15, inner_half)
                 self.assertGreaterEqual(clearance, RADII[index] + .10 - 1e-6)
                 route_distance = geometry._distance_to_polyline(
                     point, layout["route_waypoints"][lane[0]])
@@ -207,10 +213,18 @@ class StraightDetourLayoutTests(unittest.TestCase):
         self.assertTrue(any(layout["active"].sum() > 3 for layout in self.layouts))
 
     def test_invalid_counts_and_too_narrow_passage_are_rejected(self):
-        base = {"curriculum_passage_width_ranges": LEVEL_RANGES}
+        base = {
+            "passage_width_range": (0.9, 2.3),
+            "curriculum_passage_width_ranges": LEVEL_RANGES,
+            "route_barrier_crossings": (2, 2, 3),
+        }
         for options in (
-            {"passage_width_range": (.56, 1.2)},
+            {
+                "passage_width_range": (.56, 1.2),
+                "curriculum_passage_width_ranges": ((.60, 1.0),) * 6,
+            },
             {"barrier_count_range": (3, 2)},
+            {"barrier_count_range": (2, 3)},
             {"extra_obstacle_count_range": (2, 5)},
             {"curriculum_passage_width_ranges": LEVEL_RANGES[:-1]},
             {"route_barrier_crossings": (1, 2)},

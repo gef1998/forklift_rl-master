@@ -85,12 +85,14 @@ class RandomObstacleWorldConfig:
         tuple[float, float], ...
     ] = (
             (1.8, 2.3),
-            (1.6, 2.1),
-            (1.6, 2.0),
-            (1.4, 1.8),
-            (1.4, 1.8),
+            (1.5, 2.1),
+            (1.5, 2.0),
+            (1.2, 1.8),
             (1.2, 1.6),
+            (0.9, 1.6),
     )
+    # Deprecated compatibility field. Continuous barriers ignore this value;
+    # retain it so older saved environment YAML files remain loadable.
     dedicated_detour_passage_width_samples_per_level: int = 3
     dedicated_detour_barrier_count_range: tuple[int, int] = (3, 3)
     # Number of short walls each level's certified route must negotiate, one
@@ -113,9 +115,14 @@ class RandomObstacleWorldConfig:
 
     @property
     def num_wall_slots(self) -> int:
+        """Replicated wall slots used by every environment.
+
+        Dedicated detour barriers are authored only in the selected environments
+        after cloning and therefore must never be included here.
+        """
         if not self.structured_layout:
             return 0
-        return self.base_num_wall_slots + self.dedicated_detour_barrier_slots
+        return self.base_num_wall_slots
 
     @property
     def base_num_wall_slots(self) -> int:
@@ -125,11 +132,10 @@ class RandomObstacleWorldConfig:
 
     @property
     def dedicated_detour_barrier_slots(self) -> int:
+        """Actual static barriers per dedicated environment (not replicated)."""
         if self.dedicated_detour_env_count <= 0:
             return 0
-        return self.dedicated_detour_lane_count * (
-            2 * self.dedicated_detour_passage_width_samples_per_level + 1
-        )
+        return self.dedicated_detour_lane_count * 3
 
     @property
     def interior_wall_length(self) -> float:
@@ -173,65 +179,13 @@ class RandomObstacleWorldConfig:
 
     @property
     def wall_slot_lengths(self) -> tuple[float, ...]:
-        base = ((self.interior_wall_length,) * self.num_graph_wall_slots
-                + (self.narrow_gate_wall_length,) * (2 * self.max_narrow_passages))
-        if not self.dedicated_detour_barrier_slots:
-            return base
-        lane_pitch = (
-            self.arena_size - 2 * self.wall_thickness
-        ) / self.dedicated_detour_lane_count
-        # Validate the explicit ranges before deriving the fixed wall assets.
-        _ = self.dedicated_detour_passage_width_range
-        level_ranges = self.dedicated_detour_curriculum_passage_width_ranges
-        samples = self.dedicated_detour_passage_width_samples_per_level
-        if not isinstance(samples, int) or samples < 1:
-            raise ValueError(
-                "dedicated passage-width samples per level must be positive"
-            )
-        if self.dedicated_detour_barrier_count_range != (3, 3):
-            raise ValueError(
-                "six-level dedicated curriculum requires exactly three barriers per lane"
-            )
-        crossings = self.dedicated_detour_route_barrier_crossings
-        if len(crossings) != self.dedicated_detour_lane_count:
-            raise ValueError(
-                "dedicated detour requires one route-crossing count per lane"
-            )
-        if any(not isinstance(value, int) or not 1 <= value <= 3
-               for value in crossings):
-            raise ValueError(
-                "dedicated detour route crossings must be integers in 1..3"
-            )
-        if any(crossings[index] > crossings[index + 1]
-               for index in range(len(crossings) - 1)):
-            raise ValueError(
-                "dedicated detour route crossings must be non-decreasing across lanes"
-            )
-        patterns = []
-        for lane in range(self.dedicated_detour_lane_count):
-            lower_range = level_ranges[2 * lane]
-            upper_range = level_ranges[2 * lane + 1]
-            available_span = lane_pitch
-            if 0 < lane < self.dedicated_detour_lane_count - 1:
-                available_span -= self.interior_wall_thickness / 2
-            def sampled_lengths(width_range):
-                low, high = width_range
-                if samples == 1:
-                    widths = ((low + high) / 2,)
-                else:
-                    widths = tuple(
-                        low + (high - low) * index / (samples - 1)
-                        for index in range(samples)
-                    )
-                return tuple(available_span - width for width in widths)
-
-            patterns.extend(sampled_lengths(lower_range))
-            # The shared middle gate is wider than both level-specific gates.
-            patterns.append(
-                available_span - max(lower_range[1], upper_range[1])
-            )
-            patterns.extend(sampled_lengths(upper_range))
-        return base + tuple(patterns)
+        """Lengths of the base wall templates cloned into all environments."""
+        if not self.structured_layout:
+            return ()
+        return (
+            (self.interior_wall_length,) * self.num_graph_wall_slots
+            + (self.narrow_gate_wall_length,) * (2 * self.max_narrow_passages)
+        )
 
     _obstacle_types: list[str] = field(default_factory=list)
     _obstacle_radii: list[float] = field(default_factory=list)
@@ -337,6 +291,121 @@ def spawn_random_obstacle_world(cfg: RandomObstacleWorldConfig) -> None:
         _ensure_collision_api(path)
 
 
+def dedicated_detour_env_indices(
+    num_envs: int,
+    cfg: RandomObstacleWorldConfig,
+) -> tuple[int, ...]:
+    """Return dedicated envs while keeping the multi-env clone source clean."""
+    if num_envs < 1:
+        raise ValueError("num_envs must be positive")
+    if (
+        not isinstance(cfg.dedicated_detour_env_count, int)
+        or isinstance(cfg.dedicated_detour_env_count, bool)
+        or cfg.dedicated_detour_env_count < 0
+    ):
+        raise ValueError(
+            "dedicated_detour_env_count must be a non-negative integer"
+        )
+    if cfg.dedicated_detour_env_count and not cfg.structured_layout:
+        raise ValueError(
+            "dedicated detour environments require structured_layout"
+        )
+    count = min(cfg.dedicated_detour_env_count, num_envs)
+    # env_0 is the USD inheritance source. Adding a child below it after cloning
+    # would make that child appear in every clone. A one-env evaluation has no
+    # clones, so env_0 remains available in that special case.
+    if num_envs > 1:
+        count = min(count, num_envs - 1)
+    return tuple(range(num_envs - count, num_envs))
+
+
+def sample_dedicated_detour_layouts(
+    num_envs: int,
+    cfg: RandomObstacleWorldConfig,
+    seeds: list[int],
+) -> dict[int, dict]:
+    """Precompute continuous dedicated layouts before PhysX starts."""
+    env_indices = dedicated_detour_env_indices(num_envs, cfg)
+    if not env_indices:
+        return {}
+    if len(seeds) != len(env_indices):
+        raise ValueError("one seed per dedicated detour environment is required")
+    wall_lengths = np.asarray(cfg.wall_slot_lengths, dtype=np.float64)
+    layouts: dict[int, dict] = {}
+    for env_index, seed in zip(env_indices, seeds):
+        layout = sample_straight_detour_layout(
+            cfg._obstacle_bound_radii,
+            wall_lengths,
+            seed=seed ^ 0x5EED5EED,
+            arena_size=cfg.arena_size,
+            outer_wall_thickness=cfg.wall_thickness,
+            wall_width=cfg.interior_wall_thickness,
+            base_wall_slot_count=cfg.base_num_wall_slots,
+            lane_count=cfg.dedicated_detour_lane_count,
+            passage_width_range=cfg.dedicated_detour_passage_width_range,
+            curriculum_passage_width_ranges=(
+                cfg.dedicated_detour_curriculum_passage_width_ranges
+            ),
+            barrier_count_range=cfg.dedicated_detour_barrier_count_range,
+            route_barrier_crossings=cfg.dedicated_detour_route_barrier_crossings,
+            barrier_y_span=cfg.dedicated_detour_barrier_y_span,
+            extra_obstacle_count_range=(
+                cfg.dedicated_detour_extra_obstacle_count_range
+            ),
+            obstacle_wall_clearance=cfg.dedicated_detour_obstacle_wall_clearance,
+            robot_half_width=cfg.dedicated_detour_robot_half_width,
+            robot_half_length=cfg.dedicated_detour_robot_half_length,
+            collision_clearance=cfg.dedicated_detour_collision_clearance,
+            min_obstacle_spacing=cfg.min_obstacle_spacing,
+            navigation_clearance=cfg.navigation_clearance,
+            emma_clearance=cfg.emma_spawn_clearance_radius,
+            goal_clearance=cfg.goal_spawn_clearance_radius,
+            min_goal_distance=cfg.goal_min_distance,
+            spawn_bank_size=cfg.spawn_bank_size,
+            spawn_y=cfg.dedicated_detour_spawn_y,
+            spawn_lateral_jitter=cfg.dedicated_detour_spawn_lateral_jitter,
+            curriculum_levels=len(
+                cfg.dedicated_detour_curriculum_passage_width_ranges
+            ),
+        )
+        layouts[env_index] = layout
+    return layouts
+
+
+def spawn_dedicated_detour_barriers(
+    cfg: RandomObstacleWorldConfig,
+    layouts: dict[int, dict],
+) -> int:
+    """Author only the nine real static barriers in each dedicated env."""
+    count = 0
+    for env_index, layout in layouts.items():
+        for barrier_index, (pose, length) in enumerate(zip(
+            layout["barrier_poses"], layout["barrier_lengths"]
+        )):
+            x, y, yaw = (float(value) for value in pose)
+            barrier_cfg = sim_utils.CuboidCfg(
+                size=(float(length), cfg.interior_wall_thickness, cfg.wall_height),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=sim_utils.PreviewSurfaceCfg(
+                    diffuse_color=(0.40, 0.45, 0.50)
+                ),
+            )
+            path = (
+                f"/World/envs/env_{env_index}/"
+                f"DedicatedDetourBarrier_{barrier_index}"
+            )
+            quat = (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0))
+            barrier_cfg.func(
+                path,
+                barrier_cfg,
+                translation=(x, y, cfg.wall_height / 2.0),
+                orientation=quat,
+            )
+            _ensure_collision_api(path)
+            count += 1
+    return count
+
+
 class RandomObstacleWorldManager:
     """管理随机障碍、出生点和自定义 LiDAR mesh。"""
 
@@ -345,6 +414,7 @@ class RandomObstacleWorldManager:
         num_envs: int,
         cfg: RandomObstacleWorldConfig,
         device: str,
+        dedicated_detour_layouts: dict[int, dict] | None = None,
     ):
         self.num_envs = num_envs
         self.cfg = cfg
@@ -373,10 +443,13 @@ class RandomObstacleWorldManager:
             raise ValueError("dedicated_detour_env_count must be a non-negative integer")
         if cfg.dedicated_detour_env_count and not cfg.structured_layout:
             raise ValueError("dedicated detour environments require structured_layout")
-        self.dedicated_detour_start = max(
-            0, self.num_envs - min(cfg.dedicated_detour_env_count, self.num_envs)
+        dedicated_indices = dedicated_detour_env_indices(self.num_envs, cfg)
+        self.dedicated_detour_start = (
+            dedicated_indices[0] if dedicated_indices else self.num_envs
         )
-        self.dedicated_detour_layouts: dict[int, dict] = {}
+        self.dedicated_detour_layouts: dict[int, dict] = dict(
+            dedicated_detour_layouts or {}
+        )
         if not math.isfinite(cfg.dedicated_detour_heading_half_angle_deg) or not (
             0.0 <= cfg.dedicated_detour_heading_half_angle_deg <= 180.0
         ):
@@ -508,7 +581,7 @@ class RandomObstacleWorldManager:
                 device=self.device, dtype=self.positions.dtype,
             )
             self.yaws.uniform_(0, 2 * math.pi)
-            self._install_dedicated_detour_layouts(seeds)
+            self._install_dedicated_detour_layouts()
             return
         self.positions.copy_(
             sample_random_obstacle_positions(
@@ -528,70 +601,32 @@ class RandomObstacleWorldManager:
             * (2.0 * math.pi)
         )
 
-    def _install_dedicated_detour_layouts(self, seeds: list[int]) -> None:
-        """Replace the last configured layouts with sealed detour corridors."""
-
+    def _install_dedicated_detour_layouts(self) -> None:
+        """Copy pre-authored dedicated layouts into runtime tensors."""
         if self.cfg.dedicated_detour_env_count == 0:
             return
-        wall_lengths = np.asarray(self.cfg.wall_slot_lengths, dtype=np.float64)
-        for env_index in range(self.dedicated_detour_start, self.num_envs):
-            layout = sample_straight_detour_layout(
-                self.cfg._obstacle_bound_radii,
-                wall_lengths,
-                seed=seeds[env_index] ^ 0x5EED5EED,
-                arena_size=self.cfg.arena_size,
-                outer_wall_thickness=self.cfg.wall_thickness,
-                wall_width=self.cfg.interior_wall_thickness,
-                base_wall_slot_count=self.cfg.base_num_wall_slots,
-                lane_count=self.cfg.dedicated_detour_lane_count,
-                passage_width_range=self.cfg.dedicated_detour_passage_width_range,
-                curriculum_passage_width_ranges=(
-                    self.cfg.dedicated_detour_curriculum_passage_width_ranges
-                ),
-                passage_width_samples_per_level=(
-                    self.cfg.dedicated_detour_passage_width_samples_per_level
-                ),
-                barrier_count_range=self.cfg.dedicated_detour_barrier_count_range,
-                route_barrier_crossings=(
-                    self.cfg.dedicated_detour_route_barrier_crossings
-                ),
-                barrier_y_span=self.cfg.dedicated_detour_barrier_y_span,
-                extra_obstacle_count_range=(
-                    self.cfg.dedicated_detour_extra_obstacle_count_range
-                ),
-                obstacle_wall_clearance=(
-                    self.cfg.dedicated_detour_obstacle_wall_clearance
-                ),
-                robot_half_width=self.cfg.dedicated_detour_robot_half_width,
-                robot_half_length=self.cfg.dedicated_detour_robot_half_length,
-                collision_clearance=(
-                    self.cfg.dedicated_detour_collision_clearance
-                ),
-                min_obstacle_spacing=self.cfg.min_obstacle_spacing,
-                navigation_clearance=self.cfg.navigation_clearance,
-                emma_clearance=self.cfg.emma_spawn_clearance_radius,
-                goal_clearance=self.cfg.goal_spawn_clearance_radius,
-                min_goal_distance=self.cfg.goal_min_distance,
-                spawn_bank_size=self.cfg.spawn_bank_size,
-                spawn_y=self.cfg.dedicated_detour_spawn_y,
-                spawn_lateral_jitter=(
-                    self.cfg.dedicated_detour_spawn_lateral_jitter
-                ),
-                curriculum_levels=self.curriculum_spawn_pairs.shape[1],
+        expected = set(range(self.dedicated_detour_start, self.num_envs))
+        if set(self.dedicated_detour_layouts) != expected:
+            raise RuntimeError(
+                "dedicated detour layouts must be precomputed before PhysX starts"
             )
+        for env_index in sorted(expected):
+            layout = self.dedicated_detour_layouts[env_index]
             for name in ("positions", "active", "yaws", "wall_poses", "wall_active"):
                 target = self.yaws if name == "yaws" else getattr(self, name)
                 target[env_index].copy_(torch.as_tensor(
-                    layout[name], device=self.device, dtype=target.dtype))
+                    layout[name], device=self.device, dtype=target.dtype
+                ))
             self.spawn_pairs[env_index].copy_(torch.as_tensor(
                 layout["spawn_pairs"], device=self.device,
-                dtype=self.spawn_pairs.dtype))
+                dtype=self.spawn_pairs.dtype,
+            ))
             self.curriculum_spawn_pairs[env_index].copy_(torch.as_tensor(
                 layout["curriculum_pairs"], device=self.device,
-                dtype=self.curriculum_spawn_pairs.dtype))
-            self.dedicated_detour_layouts[env_index] = layout
+                dtype=self.curriculum_spawn_pairs.dtype,
+            ))
             widths = ",".join(
-                f"{value:.2f}" for lane in layout["passage_widths"]
+                f"{value:.3f}" for lane in layout["passage_widths"]
                 for value in lane
             )
             print(
@@ -770,6 +805,34 @@ class RandomObstacleWorldManager:
                 wall.apply_transform(trimesh.transformations.rotation_matrix(yaw, [0, 0, 1]))
                 wall.apply_translation([origin_x + x, origin_y + y, self.cfg.wall_height / 2])
                 meshes.append(wall)
+
+            dedicated_layout = self.dedicated_detour_layouts.get(env_index)
+            if dedicated_layout is not None:
+                for pose, length in zip(
+                    dedicated_layout["barrier_poses"],
+                    dedicated_layout["barrier_lengths"],
+                ):
+                    x, y, yaw = (float(value) for value in pose)
+                    wall = trimesh.creation.box(
+                        extents=[
+                            float(length),
+                            self.cfg.interior_wall_thickness,
+                            self.cfg.wall_height,
+                        ]
+                    )
+                    wall.apply_transform(
+                        trimesh.transformations.rotation_matrix(
+                            yaw, [0.0, 0.0, 1.0]
+                        )
+                    )
+                    wall.apply_translation(
+                        [
+                            origin_x + x,
+                            origin_y + y,
+                            self.cfg.wall_height / 2.0,
+                        ]
+                    )
+                    meshes.append(wall)
 
             for obstacle_index in range(self.num_obstacles):
                 if not self.active[env_index, obstacle_index].item():

@@ -58,12 +58,12 @@ def sample_straight_detour_layout(
     lane_count=3,
     passage_width_range=(0.60, 1.55),
     curriculum_passage_width_ranges=(
-            (1.7, 2.2),
+            (1.8, 2.3),
+            (1.5, 2.1),
             (1.5, 2.0),
-            (1.4, 1.9),
-            (1.2, 1.7),
+            (1.2, 1.8),
             (1.2, 1.6),
-            (1.0, 1.5),
+            (0.9, 1.6),
     ),
     passage_width_samples_per_level=3,
     barrier_count_range=(3, 3),
@@ -128,8 +128,10 @@ def sample_straight_detour_layout(
     if ((level_ranges[:-1, 0] < level_ranges[1:, 0]).any()
             or (level_ranges[:-1, 1] < level_ranges[1:, 1]).any()):
         raise ValueError("curriculum passage widths must run easiest to hardest")
-    # if (barrier_min, barrier_max) != (3, 3):
-    #     raise ValueError("six-level detour requires exactly three barriers per lane")
+    if (barrier_min, barrier_max) != (3, 3):
+        raise ValueError(
+            "continuous six-level detour requires exactly three barriers per lane"
+        )
     if min(robot_half_width, robot_half_length, collision_clearance) <= 0.0:
         raise ValueError("robot footprint and collision clearance must be positive")
     minimum_physical_passage = 2.0 * (
@@ -146,12 +148,13 @@ def sample_straight_detour_layout(
     inner_half = arena_size / 2.0 - outer_wall_thickness
     full_segment_length = (arena_size - 2.0 * outer_wall_thickness) / 3.0
     divider_slots = (lane_count - 1) * 3
-    slots_per_lane = 2 * passage_width_samples_per_level + 1
-    barrier_slots = lane_count * slots_per_lane
     if base_wall_slot_count < divider_slots:
         raise ValueError("base wall slots cannot hold the lane dividers")
-    if lengths.size < base_wall_slot_count + barrier_slots:
-        raise ValueError("insufficient dedicated barrier wall slots")
+    if lengths.size < base_wall_slot_count:
+        raise ValueError("insufficient base wall slots")
+    # Dedicated barriers have continuously sampled lengths and are returned
+    # separately. They are not template slots replicated into every environment.
+    lengths = lengths[:base_wall_slot_count].copy()
     if divider_slots and not np.allclose(
             lengths[:divider_slots], full_segment_length, atol=1.0e-6):
         raise ValueError("lane dividers require full cell wall slots")
@@ -197,6 +200,8 @@ def sample_straight_detour_layout(
 
     barrier_counts = np.empty(lane_count, dtype=np.int64)
     passage_widths = []
+    barrier_poses = []
+    barrier_lengths = []
     route_waypoints = []
     gate_centers = []
     curriculum_endpoint_ys = []
@@ -208,39 +213,40 @@ def sample_straight_detour_layout(
         barrier_counts[lane] = count
         y_positions = np.linspace(-barrier_y_span, barrier_y_span, count)
         y_positions += rng.uniform(-0.05, 0.05, count)
-        lane_slot_start = base_wall_slot_count + lane * slots_per_lane
-        lower_slot = lane_slot_start + int(rng.integers(
-            0, passage_width_samples_per_level
-        ))
-        middle_slot = lane_slot_start + passage_width_samples_per_level
-        upper_slot = middle_slot + 1 + int(rng.integers(
-            0, passage_width_samples_per_level
-        ))
-        selected = np.array((lower_slot, middle_slot, upper_slot))
+        # Lower and upper gates belong to the two curriculum levels sharing
+        # this lane. Sample them continuously; keep the shared middle gate wide
+        # so it does not silently become the limiting curriculum variable.
+        lower_range = level_ranges[2 * lane]
+        upper_range = level_ranges[2 * lane + 1]
+        actual_widths = np.array((
+            rng.uniform(lower_range[0], lower_range[1]),
+            max(lower_range[1], upper_range[1]),
+            rng.uniform(upper_range[0], upper_range[1]),
+        ), dtype=np.float64)
         from_left = (np.arange(count) + int(rng.integers(0, 2))) % 2 == 0
         gate_x = np.empty(count, dtype=np.float64)
-        actual_widths = np.empty(count, dtype=np.float64)
         left_inner, right_inner = lane_bounds[lane]
         left_center = outer_centers[0] if lane == 0 else edges[lane]
         right_center = outer_centers[1] if lane + 1 == lane_count else edges[lane + 1]
-        for index, (wall_slot, y, anchor_left) in enumerate(
-                zip(selected, y_positions, from_left)):
-            length = lengths[wall_slot]
+        for index, (y, anchor_left, passage_width) in enumerate(
+                zip(y_positions, from_left, actual_widths)):
             if anchor_left:
+                length = right_inner - left_center - passage_width
                 center_x = left_center + length / 2.0
                 tip = left_center + length
-                actual_widths[index] = right_inner - tip
                 gate_x[index] = (tip + right_inner) / 2.0
             else:
+                length = right_center - left_inner - passage_width
                 center_x = right_center - length / 2.0
                 tip = right_center - length
-                actual_widths[index] = tip - left_inner
                 gate_x[index] = (tip + left_inner) / 2.0
-            wall_poses[wall_slot] = (center_x, y, 0.0)
-            wall_active[wall_slot] = True
+            if length <= 0.0:
+                raise ValueError("passage width leaves a non-positive barrier length")
+            barrier_poses.append((center_x, y, 0.0))
+            barrier_lengths.append(length)
         if ((actual_widths < passage_min - 1.0e-6)
                 | (actual_widths > passage_max + 1.0e-6)).any():
-            raise ValueError("dedicated barrier slot length violates passage range")
+            raise ValueError("continuous dedicated passage violates configured range")
         passage_widths.append(actual_widths)
 
         order = np.argsort(y_positions)
@@ -289,6 +295,13 @@ def sample_straight_detour_layout(
         curriculum_endpoint_ys.append(endpoints)
         lane_route_floors.append(route_floor)
 
+    barrier_poses = np.asarray(barrier_poses, dtype=np.float64)
+    barrier_lengths = np.asarray(barrier_lengths, dtype=np.float64)
+    barrier_active = np.ones(barrier_lengths.shape[0], dtype=bool)
+    collision_wall_poses = np.concatenate((wall_poses, barrier_poses), axis=0)
+    collision_wall_active = np.concatenate((wall_active, barrier_active), axis=0)
+    collision_wall_lengths = np.concatenate((lengths, barrier_lengths), axis=0)
+
     positions = np.zeros((radii.size, 2), dtype=np.float64)
     obstacle_active = np.zeros(radii.size, dtype=bool)
     obstacle_yaws = np.zeros(radii.size, dtype=np.float64)
@@ -329,8 +342,9 @@ def sample_straight_detour_layout(
             if endpoint_clearance < radius + max(emma_clearance, goal_clearance):
                 continue
             clearance = _point_clearance(
-                candidate, positions, radii, obstacle_active, wall_poses,
-                wall_active, lengths, wall_width, inner_half)
+                candidate, positions, radii, obstacle_active,
+                collision_wall_poses, collision_wall_active,
+                collision_wall_lengths, wall_width, inner_half)
             if clearance < radius + obstacle_wall_clearance:
                 continue
             if (_distance_to_polyline(candidate, route_waypoints[lane])
@@ -374,8 +388,8 @@ def sample_straight_detour_layout(
             <= min_goal_distance).any():
         raise RuntimeError("dedicated-detour spawn bank violates min_goal_distance")
 
-    # Two levels share each fixed lane; the number of short walls their
-    # certified routes cross grows with the lane (one, two, then all three).
+    # Two levels share each fixed lane. The configured crossing count chooses
+    # how many short walls their certified routes negotiate.
     # Both levels keep their own level-specific gate on the route, so the six
     # width distributions survive without moving geometry between resets.
     curriculum_lane_ids = np.arange(curriculum_levels, dtype=np.int64) // 2
@@ -413,6 +427,12 @@ def sample_straight_detour_layout(
         "yaws": obstacle_yaws,
         "wall_poses": wall_poses,
         "wall_active": wall_active,
+        "wall_lengths": lengths,
+        "barrier_poses": barrier_poses,
+        "barrier_lengths": barrier_lengths,
+        "collision_wall_poses": collision_wall_poses,
+        "collision_wall_active": collision_wall_active,
+        "collision_wall_lengths": collision_wall_lengths,
         "spawn_pairs": spawn_pairs,
         "curriculum_pairs": curriculum_pairs,
         "spawn_lane_ids": spawn_lane_ids,

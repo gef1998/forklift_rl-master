@@ -328,6 +328,9 @@ class EmmaObsNavEnv(DirectRLEnv):
                 num_envs=self.num_envs,
                 cfg=self.cfg.random_obstacle_world,
                 device=self.device,
+                dedicated_detour_layouts=(
+                    self._precomputed_dedicated_detour_layouts
+                ),
             )
         elif self._world_mode == "corridor":
             self._world_manager = CorridorWorldManager(
@@ -827,12 +830,29 @@ class EmmaObsNavEnv(DirectRLEnv):
         elif self._world_mode == "random_obstacles":
             # 随机障碍课程: 四面外墙 + 每环境独立的圆柱/方柱布局。
             from .emma_obs_nav_random_obstacle_world import (
+                dedicated_detour_env_indices,
+                sample_dedicated_detour_layouts,
+                spawn_dedicated_detour_barriers,
                 spawn_random_obstacle_world,
             )
 
-            spawn_random_obstacle_world(self.cfg.random_obstacle_world)
-            obstacle_count = (4 + self.cfg.random_obstacle_world.num_obstacles
-                              + self.cfg.random_obstacle_world.num_wall_slots)
+            random_world_cfg = self.cfg.random_obstacle_world
+            spawn_random_obstacle_world(random_world_cfg)
+            dedicated_count = len(dedicated_detour_env_indices(
+                self.num_envs, random_world_cfg
+            ))
+            dedicated_seeds = torch.randint(
+                0, 2**31 - 1, (dedicated_count,)
+            ).cpu().tolist()
+            self._precomputed_dedicated_detour_layouts = (
+                sample_dedicated_detour_layouts(
+                    self.num_envs, random_world_cfg, dedicated_seeds
+                )
+            )
+            obstacle_count = (
+                4 + random_world_cfg.num_obstacles
+                + random_world_cfg.num_wall_slots
+            )
         elif self._world_mode == "corridor":
             spawn_s_corridor(self.cfg.corridor_world)
             obstacle_count = 6
@@ -865,6 +885,17 @@ class EmmaObsNavEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
         self.scene.clone_environments(copy_from_source=False)
+
+        if self._world_mode == "random_obstacles":
+            barrier_count = spawn_dedicated_detour_barriers(
+                self.cfg.random_obstacle_world,
+                self._precomputed_dedicated_detour_layouts,
+            )
+            print(
+                f"[DedicatedDetour] authored {barrier_count} continuous "
+                f"static barriers in "
+                f"{len(self._precomputed_dedicated_detour_layouts)} envs"
+            )
 
         # 驱动轮材质 —— 必须在 clone_environments 之后遍历所有 env, 因为每个
         # env 的轮子 collider 是独立 prim。车身 convexHull / lift 保持默认,
