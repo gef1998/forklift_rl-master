@@ -51,6 +51,27 @@ reference_planner_failure_dump_dir = "logs/reference_planner_failures"  # "" 关
 
 搜索超时、起点碰撞或点数超限时返回空路径，记录原因。此回合参考路径标志为无效，继续使用已有普通目标距离奖励；不会返回未通过碰撞校验的折线，也不重新抽出生点改变任务分布。
 
+2026-10-28：增加弱速度方向约束，补充沿程进度与位置偏差项。方向取与进度相同的局部投影线段切向，不全局搜索相邻平行路线；旧折线反向行驶时相应翻转切向。比较的是实际平移速度与路径的夹角，不是车头朝向。速度采用与 `root_pos_w` 同一参考点的 `root_link_lin_vel_w`，避免 COM 偏置把原地转向计为横移。
+
+沿路径正向移动继续获得正进度，反向移动继续得到负进度；新增项只惩罚横向运动，避免重复计入反向代价。设速度大小为 `u`，速度与有向路径切线夹角为 `theta`：
+
+```text
+w = clip((u - min_speed) / (full_speed - min_speed), 0, 1)
+q = clip((sin(theta)^2 - sin(tolerance)^2) / (1 - sin(tolerance)^2), 0, 1)
+r_velocity_direction = -cost_per_second * step_dt * w * q
+```
+
+```python
+reference_path_velocity_direction_cost_per_second = 0.15  # 设 0 关闭新增项
+reference_path_velocity_direction_tolerance_deg = 15.0
+reference_path_velocity_direction_min_speed = 0.05        # m/s，以下不约束
+reference_path_velocity_direction_full_speed = 0.30       # m/s，达到完整权重
+```
+
+例如 0.30 m/s 时，正向移动的进度项约 +3/秒、新项为 0；反向约 -3/秒、新项为 0；垂直路径横移的进度约 0、新项约 -0.15/秒。新增项最大每步为 `-0.15*dt`，没有静止对齐奖励。低速平滑衰减、原地旋转、无有效参考路径、投影发生位移跳变或终止失败时，不施加此项。允许车体倒车沿路径前进；路径没有要求固定线速度或角速度。
+
+该版本保留用户当前的位置偏差参数，与新增方向参数分别配置。新增 TensorBoard 项为 `Reward/reference_velocity_direction_mean`、`Reference/velocity_alignment_mean`（有向速度夹角余弦）和 `Reference/velocity_direction_active_fraction`（有参考路径回合中速度超过低速阈值且切向有效的比例）。设置新增系数为 0 可进行对照训练。已有 checkpoint 的行为不会因训练奖励改动直接变化，需要新的训练验证收益。
+
 `failed=time_budget seconds≈3` 通常表示某一段先用完 1.5 秒常规搜索预算，再用完 1.5 秒停车旋转后备预算。`expansions` 是累计展开节点数，少于 12000 也可以先超时。这个日志不证明几何无解。
 
 ## 诊断与导出

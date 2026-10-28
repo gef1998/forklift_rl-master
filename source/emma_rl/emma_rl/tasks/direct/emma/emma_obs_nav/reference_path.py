@@ -7,13 +7,16 @@ policy observations so exported policies keep the deployment input contract.
 from __future__ import annotations
 
 import torch
+import math
 
 
 def project_points_to_polylines(
     points: torch.Tensor,
     waypoints: torch.Tensor,
     point_counts: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    *,
+    return_tangent: bool = False,
+) -> tuple[torch.Tensor, ...]:
     """Return arc-length progress and cross-track error for padded polylines.
 
     Args:
@@ -61,13 +64,16 @@ def project_points_to_polylines(
     valid = point_counts >= 2
     progress = torch.where(valid, progress, torch.zeros_like(progress))
     cross_track = torch.where(valid, cross_track, torch.zeros_like(cross_track))
+    if return_tangent:
+        tangent = _selected_unit_tangent(segments,nearest,segment_valid.any(-1))
+        return progress,cross_track,tangent
     return progress, cross_track
 
 
 def project_continuous_progress(points, previous_points, waypoints, point_counts,
                                 previous_progress, gates, gate_counts, passed_gates,
                                 yaw, forward_sign, *, half_length, half_width,
-                                collision_margin, max_step=.10):
+                                collision_margin, max_step=.10, return_tangent=False):
     """Project only onto locally reachable arc length; unlock gates by crossing.
 
     Paths are ordered start->goal. gates[..., :] = (x, y, half_gap, path_arc).
@@ -118,4 +124,40 @@ def project_continuous_progress(points, previous_points, waypoints, point_counts
     limit = gates[:, :, 3].gather(1, next_id[:, None]).squeeze(1)
     progress = torch.where(passed < gate_counts, torch.minimum(progress, limit), progress)
     progress = torch.where(point_counts >= 2, progress, torch.zeros_like(progress))
+    if return_tangent:
+        tangent = _selected_unit_tangent(segments,nearest,any_valid & normal_step)
+        return progress,error,passed,tangent
     return progress, error, passed
+
+
+def _selected_unit_tangent(segments, nearest, valid):
+    """Use the same segment as progress projection; never a global nearest branch."""
+    tangent = segments.gather(1,nearest[:,None,None].expand(-1,1,2)).squeeze(1)
+    tangent = tangent/torch.linalg.vector_norm(tangent,dim=-1,keepdim=True).clamp_min(1e-8)
+    return torch.where(valid[:,None],tangent,torch.zeros_like(tangent))
+
+
+def reference_velocity_direction_cost(velocity, tangent, valid, *, step_dt,
+                                      cost_per_second, min_speed, full_speed,
+                                      tolerance_deg):
+    """Complement signed progress with a bounded lateral-velocity penalty.
+
+    Progress already rewards forward / penalizes backward travel. The new
+    term penalizes sin(angle)^2, avoiding a second backward cost or forcing
+    vehicle heading to equal travel direction. Low speeds smoothly fade out.
+    Both vectors must describe the same root-link point in the world frame.
+    Returns (cost, cosine, speed_weight) for reward and diagnostics.
+    """
+    speed = torch.linalg.vector_norm(velocity,dim=-1)
+    tangent_norm = torch.linalg.vector_norm(tangent,dim=-1)
+    usable = (valid & torch.isfinite(velocity).all(-1) & torch.isfinite(tangent).all(-1)
+              & (tangent_norm > .5) & (speed > min_speed))
+    cosine = (velocity*tangent).sum(-1)/(speed*tangent_norm).clamp_min(1e-8)
+    cosine = torch.where(usable,cosine.clamp(-1.,1.),torch.zeros_like(speed))
+    weight = ((speed-min_speed)/(full_speed-min_speed)).clamp(0.,1.)
+    weight = torch.where(usable,weight,torch.zeros_like(weight))
+    tolerance_sq = math.sin(math.radians(tolerance_deg))**2
+    lateral_sq = (1.-cosine.square()).clamp(0.,1.)
+    mismatch = ((lateral_sq-tolerance_sq)/(1.-tolerance_sq)).clamp(0.,1.)
+    cost = -cost_per_second*step_dt*weight*mismatch
+    return torch.where(usable,cost,torch.zeros_like(cost)),cosine,weight

@@ -64,7 +64,9 @@ from .emma_obs_nav_straight_obstacle_world import (
 )
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
 from .navigation_rewards import navigation_reward_terms
-from .reference_path import project_points_to_polylines, project_continuous_progress
+from .reference_path import (
+    project_points_to_polylines, project_continuous_progress, reference_velocity_direction_cost,
+)
 from .se2_reference_planner import PlannerConfig
 from .navigation_curriculum import NavigationCurriculum
 from .safety_control import apply_safety_control
@@ -98,6 +100,14 @@ class EmmaObsNavEnv(DirectRLEnv):
             if not math.isfinite(cfg.reference_path_visualize_height) or cfg.reference_path_visualize_height <= 0:
                 raise ValueError("reference_path_visualize_height must be finite and positive")
         if cfg.reference_path_reward_enabled:
+            direction_params = (cfg.reference_path_velocity_direction_cost_per_second,
+                                cfg.reference_path_velocity_direction_tolerance_deg,
+                                cfg.reference_path_velocity_direction_min_speed,
+                                cfg.reference_path_velocity_direction_full_speed)
+            if (not all(math.isfinite(value) for value in direction_params)
+                    or direction_params[0] < 0 or not 0 <= direction_params[1] < 90
+                    or not 0 <= direction_params[2] < direction_params[3]):
+                raise ValueError("invalid reference velocity-direction configuration")
             if (
                 cfg.reference_path_progress_per_meter < 0.0
                 or cfg.reference_path_max_progress_per_step <= 0.0
@@ -417,6 +427,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._prev_reference_progress = torch.zeros(self.num_envs, device=self.device)
         self._last_reference_progress = torch.zeros(self.num_envs, device=self.device)
         self._last_reference_cross_track = torch.zeros(self.num_envs, device=self.device)
+        self._last_reference_velocity_cosine = torch.zeros(self.num_envs, device=self.device)
+        self._last_reference_velocity_weight = torch.zeros(self.num_envs, device=self.device)
         # ---- 策略原始动作与上一控制步动作 ----
         # _prev_policy_actions 同时供奖励 (动作变化正则) 和观测 [134:136] 使用。
         # DirectRLEnv.step 的顺序是 _get_rewards → _reset_idx → _get_observations,
@@ -2003,6 +2015,11 @@ class EmmaObsNavEnv(DirectRLEnv):
             log["Reference/cross_track_mean"] = (
                 self._last_reference_cross_track * reference_mask
             ).sum() / reference_count
+            moving_reference = reference_mask*(self._last_reference_velocity_weight > 0)
+            log["Reference/velocity_alignment_mean"] = (
+                self._last_reference_velocity_cosine*moving_reference
+            ).sum()/moving_reference.sum().clamp_min(1.)
+            log["Reference/velocity_direction_active_fraction"] = moving_reference.sum()/reference_count
             log["Reference/progress_mean"] = (
                 self._reference_direction
                 * self._last_reference_progress
@@ -2045,6 +2062,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             local_position = (
                 robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
             )
+            reference_tangent = torch.zeros_like(local_position)
             if cfg.reference_path_backend == "hybrid_astar":
                 ids = self._reference_env_ids
                 reference_progress = self._prev_reference_progress.clone()
@@ -2053,7 +2071,7 @@ class EmmaObsNavEnv(DirectRLEnv):
                     # Only dedicated rows participate: avoid N_env * max_points
                     # projection work for the thousands of ordinary environments.
                     yaw = math_utils.euler_xyz_from_quat(robot.data.root_quat_w[ids])[2]
-                    progress, error, passed = project_continuous_progress(
+                    progress, error, passed, tangent = project_continuous_progress(
                         local_position[ids], self._reference_previous_position[ids],
                         self._reference_waypoints[ids], self._reference_point_counts[ids],
                         self._prev_reference_progress[ids], self._reference_gates[ids],
@@ -2061,14 +2079,17 @@ class EmmaObsNavEnv(DirectRLEnv):
                         yaw, self._reference_forward_sign[ids],
                         half_length=cfg.robot_half_length, half_width=cfg.robot_half_width,
                         collision_margin=cfg.reference_planner_collision_margin,
-                        max_step=cfg.reference_path_max_progress_per_step)
+                        max_step=cfg.reference_path_max_progress_per_step, return_tangent=True)
                     reference_progress[ids] = progress
                     cross_track[ids] = error
+                    reference_tangent[ids] = tangent
                     self._reference_passed_gates[ids] = passed
                 self._reference_previous_position.copy_(local_position.detach())
             else:
-                reference_progress, cross_track = project_points_to_polylines(
-                    local_position, self._reference_waypoints, self._reference_point_counts)
+                reference_progress, cross_track, tangent = project_points_to_polylines(
+                    local_position, self._reference_waypoints, self._reference_point_counts,
+                    return_tangent=True)
+                reference_tangent = tangent*self._reference_direction[:,None]
             progress_delta = self._reference_direction * (
                 reference_progress - self._prev_reference_progress
             )
@@ -2103,6 +2124,18 @@ class EmmaObsNavEnv(DirectRLEnv):
                 * cross_track_excess.square(),
                 torch.zeros_like(cross_track),
             )
+            # Use actor/link velocity at the same reference point as root_pos_w.
+            # COM velocity can contain a spurious planar component during yaw.
+            direction_cost, alignment, direction_weight = reference_velocity_direction_cost(
+                robot.data.root_link_lin_vel_w[:, :2], reference_tangent,
+                self._reference_valid & ~self._failure_mask, step_dt=self.step_dt,
+                cost_per_second=cfg.reference_path_velocity_direction_cost_per_second,
+                min_speed=cfg.reference_path_velocity_direction_min_speed,
+                full_speed=cfg.reference_path_velocity_direction_full_speed,
+                tolerance_deg=cfg.reference_path_velocity_direction_tolerance_deg)
+            self._reward_terms["reference_velocity_direction"] = direction_cost
+            self._last_reference_velocity_cosine.copy_(alignment.detach())
+            self._last_reference_velocity_weight.copy_(direction_weight.detach())
             self._prev_reference_progress.copy_(reference_progress.detach())
             self._last_reference_progress = reference_progress.detach()
             self._last_reference_cross_track = cross_track.detach()
@@ -2557,6 +2590,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._prev_reference_progress[env_ids] = 0.0
         self._last_reference_progress[env_ids] = 0.0
         self._last_reference_cross_track[env_ids] = 0.0
+        self._last_reference_velocity_cosine[env_ids] = 0.0
+        self._last_reference_velocity_weight[env_ids] = 0.0
         if (
             not self.cfg.reference_path_reward_enabled
             or self._world_mode != "random_obstacles"

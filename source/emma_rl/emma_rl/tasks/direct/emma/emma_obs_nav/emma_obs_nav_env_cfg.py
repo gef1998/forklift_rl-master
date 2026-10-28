@@ -542,7 +542,13 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # per-second cost outside it, so obstacle avoidance can depart from the line.
     reference_path_cross_track_tolerance: float = 0.05
     reference_path_cross_track_full_cost_error: float = 0.25
-    reference_path_cross_track_cost_per_second: float = 0.06
+    reference_path_cross_track_cost_per_second: float = 0.15
+    # Signed progress rewards forward / penalizes backward travel. This weak
+    # extra term suppresses lateral motion; it fades out around a stop/rotation.
+    reference_path_velocity_direction_cost_per_second: float = 1.5  # 0 disables
+    reference_path_velocity_direction_tolerance_deg: float = 10.0
+    reference_path_velocity_direction_min_speed: float = 0.05  # m/s
+    reference_path_velocity_direction_full_speed: float = 0.20  # m/s
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
