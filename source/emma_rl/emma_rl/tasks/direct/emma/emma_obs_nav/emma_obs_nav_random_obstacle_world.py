@@ -15,6 +15,9 @@ from isaaclab.utils.warp import convert_to_warp_mesh
 
 from .structured_random_geometry import sample_connected_layout
 from .straight_detour_geometry import sample_straight_detour_layout
+from .se2_reference_planner import (
+    DetourReferenceBank, world_from_detour_layout, ordered_detour_gates, gate_arc_lengths,
+)
 
 from .random_obstacle_geometry import (
     alternating_obstacle_types,
@@ -721,6 +724,77 @@ class RandomObstacleWorldManager:
             min_goal_distance=self.cfg.goal_min_distance,
             candidate_pool_size=self.cfg.spawn_candidate_count,
         )
+
+    def planned_reference_routes(self, env_ids, task_levels, start_local, start_yaw,
+                                 goal_local, planner_cfg, *, failure_dump_dir=""):
+        """Reset-time planning only; failed paths stay invalid, never straight fallbacks."""
+        if getattr(self, "_reference_bank", None) is None or self._reference_bank.cfg != planner_cfg:
+            self._reference_bank = DetourReferenceBank(planner_cfg)
+        n = env_ids.numel()
+        # One batched transfer per reset. No CPU planning in step/reward.
+        queries = torch.cat((env_ids[:, None], task_levels[:, None], start_local,
+                             start_yaw[:, None], goal_local), dim=1).cpu().numpy()
+        routes = np.zeros((n, planner_cfg.max_points, 2), dtype=np.float32)
+        counts = np.zeros(n, dtype=np.int64)
+        gate_rows = np.zeros((n, 3, 4), dtype=np.float32)
+        gate_counts = np.zeros(n, dtype=np.int64)
+        self.last_reference_plans = getattr(self, "last_reference_plans", {})
+        for row, query in enumerate(queries):
+            env, level = int(query[0]), int(query[1])
+            layout = self.dedicated_detour_layouts.get(env)
+            if layout is None:
+                continue
+            level = min(max(level, 0), len(layout["curriculum_lane_ids"])-1)
+            start, goal = query[2:5], query[5:7]
+            world = world_from_detour_layout(layout, self.cfg)
+            gates = ordered_detour_gates(layout, level, start, goal)
+            plan = self._reference_bank.plan(world, start, goal, gates)
+            self.last_reference_plans[env] = plan  # SE2 + gear + timing, debug/export
+            if not plan.success:
+                print(f"[ReferencePlanner] env={env} level={level} failed={plan.reason} "
+                      f"leg={plan.failed_leg+1}/{len(gates)+1} expansions={plan.expansions} "
+                      f"seconds={plan.seconds:.3f} start={start.round(4).tolist()} "
+                      f"goal={goal.round(4).tolist()}", flush=True)
+                if failure_dump_dir:
+                    self._dump_reference_failure(failure_dump_dir,env,level,world,start,goal,gates,planner_cfg,plan)
+                continue
+            count = len(plan.poses)
+            if count < 2:
+                continue
+            routes[row, :count] = plan.poses[:, :2]
+            counts[row] = count
+            gate_counts[row] = len(gates)
+            gate_rows[row, :len(gates), :3] = gates[:, :3]
+            gate_rows[row, :len(gates), 3] = gate_arc_lengths(plan.poses, gates)
+        tensors = [torch.as_tensor(a, device=self.device) for a in (routes, counts, gate_rows, gate_counts)]
+        return tensors[0], tensors[1], tensors[1] >= 2, tensors[2], tensors[3]
+
+    def _dump_reference_failure(self, directory, env, level, world, start, goal, gates, cfg, plan):
+        """At most one portable query snapshot per env/level/geometry/config."""
+        from dataclasses import asdict
+        from datetime import datetime
+        import hashlib
+        import json
+        from pathlib import Path
+        if not hasattr(self,"_reference_failure_dumped"):
+            self._reference_failure_dumped=set()
+            self._reference_failure_output=Path(directory)/datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+        key=(env,level,world.fingerprint,cfg)
+        if key in self._reference_failure_dumped:
+            return
+        self._reference_failure_dumped.add(key)
+        config_json=json.dumps(asdict(cfg),sort_keys=True)
+        config_key=hashlib.sha256(config_json.encode()).hexdigest()[:8]
+        filename=self._reference_failure_output/f"env_{env}_level_{level}_{world.fingerprint[:10]}_{config_key}.npz"
+        try:
+            filename.parent.mkdir(parents=True,exist_ok=True)
+            np.savez_compressed(filename,boxes=world.boxes,circles=world.circles,
+                                inner_half=world.inner_half,start=start,goal=goal,gates=gates,
+                                planner_config_json=config_json,env_id=env,level=level,
+                                failed_leg=plan.failed_leg,reason=plan.reason)
+            print(f"[ReferencePlanner] failure_snapshot={filename.resolve()}",flush=True)
+        except OSError as error:
+            print(f"[ReferencePlanner] failure snapshot unavailable: {error}",flush=True)
 
     def reference_routes(
         self,

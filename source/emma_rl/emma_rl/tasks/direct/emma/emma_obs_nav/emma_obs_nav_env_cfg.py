@@ -515,13 +515,34 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # necessary lateral detour may temporarily increase straight-line distance.
     # This privileged signal is never included in policy observations.
     reference_path_reward_enabled: bool = True
+    # Stage 1: dedicated detour environments only. "polyline" reproduces the
+    # original template reward. No policy observation or reward weight changes.
+    reference_path_backend: str = "hybrid_astar"
+    reference_planner_xy_resolution: float = 0.01
+    reference_planner_yaw_resolution_deg: float = 1.0
+    reference_planner_min_turning_radius: float = 0.50
+    reference_planner_analytic_radius_factors: tuple[float, ...] = (1.0, 1.1, 1.5, 2.0)
+    reference_planner_inplace_rotation_fallback: bool = True
+    reference_planner_collision_margin: float = 0.01
+    reference_planner_max_seconds: float = 1.5  # per leg/pass; optional second rotation pass
+    reference_planner_max_expansions: int = 12000
+    reference_planner_cache_size: int = 2048
+    reference_planner_max_points: int = 1024
+    reference_planner_failure_dump_dir: str = "logs/reference_planner_failures"  # "" disables snapshots
+    # Optional diagnostics; () selects the first dedicated detour environment.
+    reference_path_visualize: bool = False
+    reference_path_visualize_env_ids: tuple[int, ...] = ()
+    reference_path_visualize_height: float = 0.12
+    reference_path_export_png: bool = False
+    reference_path_export_dir: str = "logs/reference_paths"
+    reference_path_export_max_per_env: int = 1  # 0 = every reset, otherwise first N
     reference_path_progress_per_meter: float = 10.0
     reference_path_max_progress_per_step: float = 0.10
     # Keep path following weak: no cost inside the tolerance and a bounded
     # per-second cost outside it, so obstacle avoidance can depart from the line.
-    reference_path_cross_track_tolerance: float = 0.25
-    reference_path_cross_track_full_cost_error: float = 1.00
-    reference_path_cross_track_cost_per_second: float = 0.05
+    reference_path_cross_track_tolerance: float = 0.05
+    reference_path_cross_track_full_cost_error: float = 0.25
+    reference_path_cross_track_cost_per_second: float = 0.06
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.

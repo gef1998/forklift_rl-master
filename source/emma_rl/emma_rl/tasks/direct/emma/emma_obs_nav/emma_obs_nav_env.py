@@ -64,7 +64,8 @@ from .emma_obs_nav_straight_obstacle_world import (
 )
 from .emma_obs_nav_world import ObstacleWorldManager, spawn_obstacles
 from .navigation_rewards import navigation_reward_terms
-from .reference_path import project_points_to_polylines
+from .reference_path import project_points_to_polylines, project_continuous_progress
+from .se2_reference_planner import PlannerConfig
 from .navigation_curriculum import NavigationCurriculum
 from .safety_control import apply_safety_control
 
@@ -89,6 +90,13 @@ class EmmaObsNavEnv(DirectRLEnv):
             or cfg.motion_command_low_pass_tau_s <= 0.0
         ):
             raise ValueError("motion_command_low_pass_tau_s must be finite and positive")
+        if cfg.reference_path_backend not in ("polyline", "hybrid_astar"):
+            raise ValueError("reference_path_backend must be polyline or hybrid_astar")
+        if cfg.reference_path_visualize or cfg.reference_path_export_png:
+            if cfg.reference_path_backend != "hybrid_astar" or not cfg.reference_path_reward_enabled:
+                raise ValueError("reference visualization requires enabled hybrid_astar references")
+            if not math.isfinite(cfg.reference_path_visualize_height) or cfg.reference_path_visualize_height <= 0:
+                raise ValueError("reference_path_visualize_height must be finite and positive")
         if cfg.reference_path_reward_enabled:
             if (
                 cfg.reference_path_progress_per_meter < 0.0
@@ -387,6 +395,15 @@ class EmmaObsNavEnv(DirectRLEnv):
             2,
             3 * self.cfg.random_obstacle_world.dedicated_detour_barrier_count_range[1] + 2,
         )
+        if self.cfg.reference_path_backend == "hybrid_astar":
+            max_reference_waypoints = self.cfg.reference_planner_max_points
+        self._reference_previous_position = torch.zeros(self.num_envs, 2, device=self.device)
+        self._reference_gates = torch.zeros(self.num_envs, 3, 4, device=self.device)
+        self._reference_gate_counts = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._reference_passed_gates = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._reference_forward_sign = torch.ones(self.num_envs, device=self.device)
+        dedicated_start = getattr(self._world_manager, "dedicated_detour_start", self.num_envs)
+        self._reference_env_ids = torch.arange(dedicated_start, self.num_envs, device=self.device)
         self._reference_waypoints = torch.zeros(
             self.num_envs, max_reference_waypoints, 2, device=self.device,
         )
@@ -1973,6 +1990,16 @@ class EmmaObsNavEnv(DirectRLEnv):
             )
             reference_count = reference_mask.sum().clamp_min(1.0)
             log["Reference/active_fraction"] = reference_mask.mean()
+            bank = getattr(self._world_manager, "_reference_bank", None)
+            if bank is not None:
+                for name, value in bank.stats.items():
+                    log[f"ReferencePlanner/{name}"] = float(value)
+                requests = max(1, bank.stats["requests"])
+                log["ReferencePlanner/success_rate"] = bank.stats["successes"] / requests
+                log["ReferencePlanner/mean_reset_plan_ms"] = 1000*bank.stats["seconds"] / requests
+                successes = max(1, bank.stats["successes"])
+                log["ReferencePlanner/stop_path_rate"] = bank.stats["stop_paths"] / successes
+                log["ReferencePlanner/rotation_path_rate"] = bank.stats["rotation_paths"] / successes
             log["Reference/cross_track_mean"] = (
                 self._last_reference_cross_track * reference_mask
             ).sum() / reference_count
@@ -2018,11 +2045,30 @@ class EmmaObsNavEnv(DirectRLEnv):
             local_position = (
                 robot.data.root_pos_w[:, :2] - self.scene.env_origins[:, :2]
             )
-            reference_progress, cross_track = project_points_to_polylines(
-                local_position,
-                self._reference_waypoints,
-                self._reference_point_counts,
-            )
+            if cfg.reference_path_backend == "hybrid_astar":
+                ids = self._reference_env_ids
+                reference_progress = self._prev_reference_progress.clone()
+                cross_track = torch.zeros_like(reference_progress)
+                if ids.numel():
+                    # Only dedicated rows participate: avoid N_env * max_points
+                    # projection work for the thousands of ordinary environments.
+                    yaw = math_utils.euler_xyz_from_quat(robot.data.root_quat_w[ids])[2]
+                    progress, error, passed = project_continuous_progress(
+                        local_position[ids], self._reference_previous_position[ids],
+                        self._reference_waypoints[ids], self._reference_point_counts[ids],
+                        self._prev_reference_progress[ids], self._reference_gates[ids],
+                        self._reference_gate_counts[ids], self._reference_passed_gates[ids],
+                        yaw, self._reference_forward_sign[ids],
+                        half_length=cfg.robot_half_length, half_width=cfg.robot_half_width,
+                        collision_margin=cfg.reference_planner_collision_margin,
+                        max_step=cfg.reference_path_max_progress_per_step)
+                    reference_progress[ids] = progress
+                    cross_track[ids] = error
+                    self._reference_passed_gates[ids] = passed
+                self._reference_previous_position.copy_(local_position.detach())
+            else:
+                reference_progress, cross_track = project_points_to_polylines(
+                    local_position, self._reference_waypoints, self._reference_point_counts)
             progress_delta = self._reference_direction * (
                 reference_progress - self._prev_reference_progress
             )
@@ -2418,7 +2464,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         # ---- 3. 目标点 ----
         self.goal_pos_xy[env_ids] = goal_local + env_origins_xy
         self._update_goal_marker(env_ids)
-        self._reset_reference_paths(env_ids, emma_local, goal_local)
+        self._reset_reference_paths(env_ids, emma_local, goal_local, rand_yaw)
 
         # ---- 4. 重置跟踪状态 ----
         ICR_pos_w = self.robot.data.root_pos_w
@@ -2496,8 +2542,14 @@ class EmmaObsNavEnv(DirectRLEnv):
         env_ids: torch.Tensor,
         start_local: torch.Tensor,
         goal_local: torch.Tensor,
+        start_yaw: torch.Tensor,
     ) -> None:
         """Install privileged detour routes for newly reset environments."""
+        self._reference_previous_position[env_ids] = start_local
+        self._reference_gates[env_ids] = 0.0
+        self._reference_gate_counts[env_ids] = 0
+        self._reference_passed_gates[env_ids] = 0
+        self._reference_forward_sign[env_ids] = torch.where(goal_local[:, 1] >= start_local[:, 1], 1., -1.)
         self._reference_waypoints[env_ids] = 0.0
         self._reference_point_counts[env_ids] = 0
         self._reference_valid[env_ids] = False
@@ -2512,6 +2564,33 @@ class EmmaObsNavEnv(DirectRLEnv):
         ):
             return
 
+        if self.cfg.reference_path_backend == "hybrid_astar":
+            cfg = self.cfg
+            planner_cfg = PlannerConfig(
+                half_length=cfg.robot_half_length, half_width=cfg.robot_half_width,
+                margin=cfg.reference_planner_collision_margin,
+                xy_resolution=cfg.reference_planner_xy_resolution,
+                yaw_resolution_deg=cfg.reference_planner_yaw_resolution_deg,
+                min_turning_radius=cfg.reference_planner_min_turning_radius,
+                analytic_radius_factors=cfg.reference_planner_analytic_radius_factors,
+                inplace_rotation_fallback=cfg.reference_planner_inplace_rotation_fallback,
+                max_seconds=cfg.reference_planner_max_seconds,
+                max_expansions=cfg.reference_planner_max_expansions,
+                cache_size=cfg.reference_planner_cache_size,
+                max_points=cfg.reference_planner_max_points,
+            )
+            routes, counts, valid, gates, gate_counts = self._world_manager.planned_reference_routes(
+                env_ids, self._episode_task_level[env_ids], start_local, start_yaw,
+                goal_local, planner_cfg, failure_dump_dir=cfg.reference_planner_failure_dump_dir)
+            self._reference_waypoints[env_ids] = routes
+            self._reference_point_counts[env_ids] = counts
+            self._reference_valid[env_ids] = valid
+            self._reference_gates[env_ids] = gates
+            self._reference_gate_counts[env_ids] = gate_counts
+            # Planned paths are directed from the actual start, including reverse motions.
+            self._reference_direction[env_ids] = 1.0
+            self._update_reference_visualizations(env_ids, start_local, start_yaw, goal_local)
+            return
         routes, point_counts, valid = self._world_manager.reference_routes(
             env_ids,
             self._episode_task_level[env_ids],
@@ -2532,6 +2611,55 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._prev_reference_progress[env_ids] = progress
         self._last_reference_progress[env_ids] = progress
         self._last_reference_cross_track[env_ids] = cross_track
+
+    def _update_reference_visualizations(self, env_ids, start_local, start_yaw, goal_local):
+        """Render only selected reset results; never invoke planning a second time."""
+        cfg = self.cfg
+        if not (cfg.reference_path_visualize or cfg.reference_path_export_png):
+            return
+        from datetime import datetime
+        from pathlib import Path
+        from .reference_path_visualization import export_reference_png, ReferencePathOverlay
+        from .se2_reference_planner import world_from_detour_layout, ordered_detour_gates
+
+        manager = self._world_manager
+        selected = tuple(cfg.reference_path_visualize_env_ids)
+        if not selected:
+            selected = tuple(sorted(manager.dedicated_detour_layouts)[:1])
+        invalid = set(selected) - set(manager.dedicated_detour_layouts)
+        if invalid:
+            raise ValueError(f"reference visualization requires dedicated detour env IDs, got {sorted(invalid)}")
+        if cfg.reference_path_export_max_per_env < 0:
+            raise ValueError("reference_path_export_max_per_env must be >= 0")
+        if not hasattr(self, "_reference_visual_counts"):
+            self._reference_visual_counts = {}
+            self._reference_visual_output = Path(cfg.reference_path_export_dir) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
+        # With diagnostics off, no extra CUDA transfers or Matplotlib imports occur.
+        for row, env_id in enumerate(env_ids.cpu().tolist()):
+            if env_id not in selected:
+                continue
+            plan = manager.last_reference_plans[env_id]
+            start = torch.cat((start_local[row], start_yaw[row:row+1])).cpu().numpy()
+            goal = goal_local[row].cpu().numpy()
+            level = int(self._episode_task_level[env_id].item())
+            layout = manager.dedicated_detour_layouts[env_id]
+            gates = ordered_detour_gates(layout, level, start, goal)
+            if cfg.reference_path_visualize:
+                if not hasattr(self, "_reference_overlay"):
+                    import omni.usd
+                    self._reference_overlay = ReferencePathOverlay(omni.usd.get_context().get_stage())
+                self._reference_overlay.update(
+                    env_id, self.scene.env_origins[env_id].cpu().numpy(), plan,
+                    start, goal, gates, height=cfg.reference_path_visualize_height)
+            count = self._reference_visual_counts.get(env_id, 0)
+            limit = cfg.reference_path_export_max_per_env
+            if cfg.reference_path_export_png and (limit == 0 or count < limit):
+                filename = self._reference_visual_output / f"env_{env_id:04d}_level_{level}_reset_{count+1:04d}.png"
+                export_reference_png(filename, world_from_detour_layout(layout, manager.cfg),
+                                     plan, start, goal, gates, manager._reference_bank.cfg,
+                                     env_id=env_id, level=level)
+                self._reference_visual_counts[env_id] = count + 1
+                print(f"[ReferencePNG] {filename.resolve()}", flush=True)
 
     def _update_goal_marker(self, env_ids: torch.Tensor) -> None:
         n = len(env_ids)

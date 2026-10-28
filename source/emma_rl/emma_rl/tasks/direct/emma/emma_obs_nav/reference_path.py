@@ -62,3 +62,60 @@ def project_points_to_polylines(
     progress = torch.where(valid, progress, torch.zeros_like(progress))
     cross_track = torch.where(valid, cross_track, torch.zeros_like(cross_track))
     return progress, cross_track
+
+
+def project_continuous_progress(points, previous_points, waypoints, point_counts,
+                                previous_progress, gates, gate_counts, passed_gates,
+                                yaw, forward_sign, *, half_length, half_width,
+                                collision_margin, max_step=.10):
+    """Project only onto locally reachable arc length; unlock gates by crossing.
+
+    Paths are ordered start->goal. gates[..., :] = (x, y, half_gap, path_arc).
+    Rotation produces no translation reward. Backtracking remains signed.
+    Large jumps (reset/teleport/contact impulses) do not unlock a future gate.
+    """
+    starts = waypoints[:, :-1]
+    segments = waypoints[:, 1:] - starts
+    squared = segments.square().sum(-1)
+    lengths = squared.sqrt()
+    ids = torch.arange(segments.shape[1], device=points.device)[None]
+    valid = (ids < (point_counts-1).clamp_min(0)[:, None]) & (squared > 1e-10)
+    lengths = lengths * valid
+    prefix = torch.cumsum(lengths, -1) - lengths
+    displacement = torch.linalg.vector_norm(points-previous_points, dim=-1)
+    normal_step = displacement <= max_step
+    window = (2*displacement).clamp_max(max_step)
+    window = torch.where(normal_step, window, torch.zeros_like(window))
+    lo = (previous_progress-window).clamp_min(0)[:, None]
+    hi = (previous_progress+window)[:, None]
+    valid &= (prefix <= hi) & (prefix+lengths >= lo)
+    fraction = ((points[:, None]-starts)*segments).sum(-1) / squared.clamp_min(1e-10)
+    fraction = torch.maximum(fraction, ((lo-prefix)/lengths.clamp_min(1e-10)).clamp(0,1))
+    fraction = torch.minimum(fraction, ((hi-prefix)/lengths.clamp_min(1e-10)).clamp(0,1))
+    nearest_points = starts + fraction[..., None]*segments
+    distances = (points[:, None]-nearest_points).square().sum(-1).masked_fill(~valid, torch.inf)
+    nearest = distances.argmin(-1)
+    progress = (prefix+fraction*lengths).gather(1, nearest[:, None]).squeeze(1)
+    error = distances.gather(1, nearest[:, None]).squeeze(1).sqrt()
+    any_valid = valid.any(-1)
+    progress = torch.where(any_valid, progress, previous_progress)
+    error = torch.where(any_valid, error, torch.zeros_like(error))
+
+    next_id = passed_gates.clamp(max=gates.shape[1]-1)
+    next_gate = gates.gather(1, next_id[:, None, None].expand(-1,1,4)).squeeze(1)
+    before = (previous_points[:, 1]-next_gate[:, 1])*forward_sign
+    after = (points[:, 1]-next_gate[:, 1])*forward_sign
+    dy = points[:, 1]-previous_points[:, 1]
+    ratio = torch.where(dy.abs() > 1e-8, (next_gate[:, 1]-previous_points[:, 1])/dy,
+                        torch.zeros_like(dy)).clamp(0,1)
+    crossing_x = previous_points[:, 0]+ratio*(points[:, 0]-previous_points[:, 0])
+    body_extent = half_length*yaw.cos().abs()+half_width*yaw.sin().abs()+collision_margin
+    crossed = ((passed_gates < gate_counts) & (before <= 0) & (after > 0)
+               & ((crossing_x-next_gate[:, 0]).abs()+body_extent <= next_gate[:, 2])
+               & normal_step)
+    passed = passed_gates + crossed.long()
+    next_id = passed.clamp(max=gates.shape[1]-1)
+    limit = gates[:, :, 3].gather(1, next_id[:, None]).squeeze(1)
+    progress = torch.where(passed < gate_counts, torch.minimum(progress, limit), progress)
+    progress = torch.where(point_counts >= 2, progress, torch.zeros_like(progress))
+    return progress, error, passed
