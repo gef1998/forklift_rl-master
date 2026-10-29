@@ -10,6 +10,8 @@ import trimesh
 import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
 
+from .lidar_ground import make_lidar_ground
+
 from .corridor_geometry import (
     s_corridor_wall_specs,
     sample_s_corridor_spawn_pairs,
@@ -165,9 +167,7 @@ class CorridorWorldManager:
         """构建地面和每个克隆环境的六面墙，用于自定义 LiDAR。"""
 
         meshes: list[trimesh.Trimesh] = []
-        total_size = self.cfg.arena_size * max(int(self.num_envs**0.5), 1)
-        ground = trimesh.creation.box(extents=[total_size, total_size, 0.02])
-        ground.apply_translation([0.0, 0.0, -0.01])
+        ground = make_lidar_ground(env_origins, self.cfg.arena_size)
         meshes.append(ground)
 
         for env_index in range(self.num_envs):

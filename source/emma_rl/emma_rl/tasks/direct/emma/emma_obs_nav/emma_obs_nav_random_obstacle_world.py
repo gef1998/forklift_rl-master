@@ -13,6 +13,8 @@ import trimesh
 import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
 
+from .lidar_ground import make_lidar_ground
+
 from .structured_random_geometry import sample_connected_layout
 from .straight_detour_geometry import sample_straight_detour_layout
 from .se2_reference_planner import (
@@ -851,9 +853,7 @@ class RandomObstacleWorldManager:
         """构建地面、外墙及每环境随机混合障碍的 LiDAR mesh。"""
 
         meshes: list[trimesh.Trimesh] = []
-        total_size = self.cfg.arena_size * max(int(math.sqrt(self.num_envs)), 1)
-        ground = trimesh.creation.box(extents=[total_size, total_size, 0.02])
-        ground.apply_translation([0.0, 0.0, -0.01])
+        ground = make_lidar_ground(env_origins, self.cfg.arena_size)
         meshes.append(ground)
         walls = outer_wall_specs(self.cfg.arena_size, self.cfg.wall_thickness)
 

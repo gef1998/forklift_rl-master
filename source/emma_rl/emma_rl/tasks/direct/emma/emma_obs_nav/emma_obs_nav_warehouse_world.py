@@ -16,6 +16,8 @@ import trimesh
 import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
 
+from .lidar_ground import make_lidar_ground
+
 
 # ===================================================================
 # 1. Warehouse Config
@@ -791,9 +793,7 @@ class WarehouseWorldManager:
         """Build warp mesh: ground + walls + shelves + cylinders."""
         all_meshes = []
 
-        total_size = self.cfg.arena_size * max(int(math.sqrt(self.num_envs)), 1)
-        ground = trimesh.creation.box(extents=[total_size, total_size, 0.02])
-        ground.apply_translation([0, 0, -0.01])
+        ground = make_lidar_ground(env_origins, self.cfg.arena_size)
         all_meshes.append(ground)
 
         for env_i in range(self.num_envs):

@@ -12,6 +12,8 @@ import trimesh
 import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
 
+from .lidar_ground import make_lidar_ground
+
 from .ring_geometry import (
     alternating_obstacle_types,
     maze_wall_specs,
@@ -275,9 +277,7 @@ class ObstacleWorldManager:
         """Build ground, maze walls, cylinders, and oriented cubes for LiDAR."""
 
         meshes: list[trimesh.Trimesh] = []
-        total_size = self.cfg.arena_size * max(int(math.sqrt(self.num_envs)), 1)
-        ground = trimesh.creation.box(extents=[total_size, total_size, 0.02])
-        ground.apply_translation([0.0, 0.0, -0.01])
+        ground = make_lidar_ground(env_origins, self.cfg.arena_size)
         meshes.append(ground)
 
         wall_specs = maze_wall_specs(

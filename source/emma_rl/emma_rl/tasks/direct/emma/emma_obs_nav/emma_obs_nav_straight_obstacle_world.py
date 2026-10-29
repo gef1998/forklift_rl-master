@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +9,8 @@ import trimesh
 
 import isaaclab.sim as sim_utils
 from isaaclab.utils.warp import convert_to_warp_mesh
+
+from .lidar_ground import make_lidar_ground
 
 from .straight_obstacle_geometry import (
     sample_straight_obstacle_spawn_pairs,
@@ -127,10 +128,7 @@ class StraightObstacleWorldManager:
 
     def build_warp_mesh(self, env_origins: torch.Tensor, device: str):
         meshes: list[trimesh.Trimesh] = []
-        grid_side = max(int(math.ceil(math.sqrt(self.num_envs))), 1)
-        ground_size = self.cfg.arena_size * grid_side
-        ground = trimesh.creation.box(extents=[ground_size, ground_size, 0.02])
-        ground.apply_translation([0.0, 0.0, -0.01])
+        ground = make_lidar_ground(env_origins, self.cfg.arena_size)
         meshes.append(ground)
         specs = straight_obstacle_specs(
             arena_length=self.cfg.arena_length,
