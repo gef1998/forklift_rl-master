@@ -118,7 +118,7 @@ def _metadata(base_env, step_dt):
         "solver_velocity_iteration_count": int(
             cfg.robot_cfg.spawn.articulation_props.solver_velocity_iteration_count),
         "wheel_radius_m": float(cfg.wheel_radius),
-        "wheel_base_m": float(cfg.wheel_base),
+        "track_width_m": float(cfg.track_width),
         "wheel_max_velocity_radps": float(cfg.wheel_max_velocity),
         "max_linear_velocity_mps": float(cfg.max_linear_velocity),
         "max_angular_velocity_radps": float(cfg.max_angular_velocity),
@@ -228,7 +228,7 @@ def main() -> None:
     device = base_env.device
     dt = float(base_env.step_dt)
     radius = float(base_env.cfg.wheel_radius)
-    wheel_base = float(base_env.cfg.wheel_base)
+    track_width = float(base_env.cfg.track_width)
     wheel_limit = float(base_env.cfg.wheel_max_velocity)
     max_linear = float(base_env.cfg.max_linear_velocity)
     max_angular = float(base_env.cfg.max_angular_velocity)
@@ -264,7 +264,7 @@ def main() -> None:
                     value, segment = item
                     action = action_components(run["axis"], value)
                     target = action_to_motion(action[0], action[1], max_linear,
-                                              max_angular, radius, wheel_base,
+                                              max_angular, radius, track_width,
                                               wheel_limit)
                     command_time = sequence * dt
                     requested.append(stream_row(
@@ -281,7 +281,7 @@ def main() -> None:
                     command_motion["vx_mps"] = .5 * radius * (
                         command_motion["left_radps"] + command_motion["right_radps"])
                     command_motion["wz_radps"] = radius * (
-                        command_motion["right_radps"] - command_motion["left_radps"]) / wheel_base
+                        command_motion["right_radps"] - command_motion["left_radps"]) / track_width
                     commanded.append(stream_row(
                         run, sequence, segment, command_time, command_motion,
                         action=action, message_stamp_s=command_time,

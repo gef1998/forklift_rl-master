@@ -168,12 +168,12 @@ def main():
             write_log(fp, "\n  No valid measurements!")
 
         # ================================================================
-        # 6. Measure wheel base (in-place rotation: w_L = -w_R)
+        # 6. Measure track width (in-place rotation: w_L = -w_R)
         # ================================================================
-        write_log(fp, "\n[6] Measuring wheel base (in-place rotation: w_L = -w_R)...")
+        write_log(fp, "\n[6] Measuring track width (in-place rotation: w_L = -w_R)...")
 
         omega_test = 5.0  # rad/s
-        base_results = []
+        track_results = []
 
         for direction in [+1, -1]:
             try:
@@ -206,10 +206,10 @@ def main():
 
                 write_log(fp, "  dir=%+d: w_L=%.3f w_R=%.3f delta_w=%.3f -> omega_z=%.4f -> L=%.4f m" %
                           (direction, w_L, w_R, delta_w, omega_z, L_eff))
-                base_results.append(L_eff)
+                track_results.append(L_eff)
 
             except Exception as e:
-                write_log(fp, "  ERROR during wheel base measurement: %s" % e)
+                write_log(fp, "  ERROR during track width measurement: %s" % e)
                 write_log(fp, traceback.format_exc())
 
             # Stop
@@ -220,10 +220,10 @@ def main():
             except Exception:
                 pass
 
-        valid_bases = [b for b in base_results if abs(b) > 0.01 and abs(b) < 2.0]
-        if valid_bases:
-            avg_base = np.mean(valid_bases)
-            write_log(fp, "\n  >>> Wheel base: %.4f m" % avg_base)
+        valid_tracks = [b for b in track_results if abs(b) > 0.01 and abs(b) < 2.0]
+        if valid_tracks:
+            avg_track = np.mean(valid_tracks)
+            write_log(fp, "\n  >>> Track width: %.4f m" % avg_track)
 
         # ================================================================
         # 7. Summary
@@ -232,14 +232,14 @@ def main():
         write_log(fp, "SUMMARY FOR RL ENV CONFIG")
         write_log(fp, "=" * 60)
         write_log(fp, "  wheel_radius = %.4f  # m (effective, sim-verified)" % avg_r)
-        if valid_bases:
-            write_log(fp, "  wheel_base   = %.4f  # m (distance between L/R wheels)" % avg_base)
+        if valid_tracks:
+            write_log(fp, "  track_width   = %.4f  # m (distance between L/R wheels)" % avg_track)
         write_log(fp, "")
         write_log(fp, "  Differential drive kinematics:")
         write_log(fp, "    v_lin  = (w_L + w_R) / 2 * wheel_radius")
-        write_log(fp, "    v_ang  = (w_R - w_L) / wheel_base * wheel_radius")
-        write_log(fp, "    w_L = (v_lin - v_ang * wheel_base/2) / wheel_radius")
-        write_log(fp, "    w_R = (v_lin + v_ang * wheel_base/2) / wheel_radius")
+        write_log(fp, "    v_ang  = (w_R - w_L) / track_width * wheel_radius")
+        write_log(fp, "    w_L = (v_lin - v_ang * track_width/2) / wheel_radius")
+        write_log(fp, "    w_R = (v_lin + v_ang * track_width/2) / wheel_radius")
 
         write_log(fp, "\nDone.")
 

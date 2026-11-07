@@ -159,7 +159,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         kinematic_vmax, kinematic_wmax = differential_drive_kinematic_limits(
             cfg.wheel_max_velocity,
             cfg.wheel_radius,
-            cfg.wheel_base,
+            cfg.track_width,
         )
         if cfg.sync_body_velocity_limits_to_wheels:
             # Hydra 可能只覆盖轮径、轮距或轮速上限；运行时重新计算，保证
@@ -304,7 +304,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         )
         print(
             f"[Drive] wheel_radius={self.cfg.wheel_radius:.4f}m "
-            f"track_width={self.cfg.wheel_base:.4f}m "
+            f"track_width={self.cfg.track_width:.4f}m "
             f"wheel_limit={self.cfg.wheel_max_velocity:.3f}rad/s "
             f"body_limits=({self.cfg.max_linear_velocity:.3f}m/s, "
             f"{self.cfg.max_angular_velocity:.3f}rad/s) "
@@ -1183,7 +1183,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._action_control_mode,
             cfg.wheel_max_velocity,
             cfg.wheel_radius,
-            cfg.wheel_base,
+            cfg.track_width,
             cfg.max_linear_velocity,
             cfg.max_angular_velocity,
             self._dr_wheel_r_scale[:n],
@@ -1198,7 +1198,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             raw_wheels,
             cfg.wheel_max_velocity,
             cfg.wheel_radius,
-            cfg.wheel_base,
+            cfg.track_width,
             cfg.max_linear_velocity,
             cfg.max_angular_velocity,
             self._dr_wheel_r_scale[:n],
@@ -1214,7 +1214,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._shield_lidar_sector_angles[:n],
             self._shield_aoi[:n],
             wheel_radius=cfg.wheel_radius,
-            wheel_base=cfg.wheel_base,
+            track_width=cfg.track_width,
             wheel_max_velocity=cfg.wheel_max_velocity,
             forward_half_angle_deg=safety_cfg.forward_half_angle_deg,
             stop_clearance=safety_cfg.stop_clearance,
@@ -1239,7 +1239,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         if cfg.enable_motion_acceleration_limits:
             wheel_targets, acceleration_scale = limit_wheel_velocity_acceleration(
                 filtered_wheels, self._wheel_vel_cmd[:n], self.step_dt,
-                cfg.wheel_radius, cfg.wheel_base,
+                cfg.wheel_radius, cfg.track_width,
                 cfg.max_linear_acceleration * cfg.linear_acceleration_command_scale,
                 cfg.max_angular_acceleration * cfg.angular_acceleration_command_scale,
                 self._dr_wheel_r_scale[:n],
@@ -1258,13 +1258,13 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._requested_body_twist_cmd[:n] = wheel_velocities_to_body_twist(
             raw_wheels,
             cfg.wheel_radius,
-            cfg.wheel_base,
+            cfg.track_width,
             self._dr_wheel_r_scale[:n],
         )
         self._projected_body_twist_cmd[:n] = wheel_velocities_to_body_twist(
             feasible_wheels,
             cfg.wheel_radius,
-            cfg.wheel_base,
+            cfg.track_width,
             self._dr_wheel_r_scale[:n],
         )
         self._safe_body_twist_cmd[:n] = safety_diag["safe_twist"]

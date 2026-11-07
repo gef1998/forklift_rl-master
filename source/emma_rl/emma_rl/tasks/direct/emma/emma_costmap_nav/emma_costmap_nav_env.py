@@ -217,11 +217,11 @@ class EmmaCostmapNavEnv(DirectRLEnv):
         v_ang = (actions_noisy[:, 1] * 2.0 - 1.0) * cfg.max_angular_velocity
 
         # ---- 差速运动学 ----
-        half_base = cfg.wheel_base / 2.0
+        half_track = cfg.track_width / 2.0
         effective_r = cfg.wheel_radius * self._dr_wheel_r_scale[:n]
 
-        w_left = (v_lin - v_ang * half_base) / effective_r
-        w_right = (v_lin + v_ang * half_base) / effective_r
+        w_left = (v_lin - v_ang * half_track) / effective_r
+        w_right = (v_lin + v_ang * half_track) / effective_r
 
         # 轮速滑移噪声
         if dr.enable_dynamics_noise and dr.wheel_slip_noise_std > 0 and ns > 0:

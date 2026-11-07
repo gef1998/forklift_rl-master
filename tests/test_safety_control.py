@@ -27,13 +27,13 @@ SPEC.loader.exec_module(safety_control)
 
 
 WHEEL_RADIUS = 0.05
-WHEEL_BASE = 0.43
+TRACK_WIDTH = 0.43
 WHEEL_MAX = 20.0
 ANGLES = torch.deg2rad(torch.arange(0.0, 360.0, 3.0) + 1.5)
 
 
 def _wheels(vx: float, wz: float) -> torch.Tensor:
-    half = WHEEL_BASE / 2.0
+    half = TRACK_WIDTH / 2.0
     return torch.tensor([[
         (vx - wz * half) / WHEEL_RADIUS,
         (vx + wz * half) / WHEEL_RADIUS,
@@ -52,7 +52,7 @@ def _apply(
 ):
     params = dict(
         wheel_radius=WHEEL_RADIUS,
-        wheel_base=WHEEL_BASE,
+        track_width=TRACK_WIDTH,
         wheel_max_velocity=WHEEL_MAX,
         forward_half_angle_deg=30.0,
         stop_clearance=0.3,

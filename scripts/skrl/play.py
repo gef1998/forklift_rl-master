@@ -645,6 +645,9 @@ def main():
     env_cfg.lidar_observation_blind_fill_clearance = (
         args_cli.lidar_blind_fill_clearance
     )
+
+    env_cfg.collision_clearance_threshold = 0.001
+
     env_cfg.debug_lidar_fov_fill = args_cli.debug_lidar_fov_fill
     print(
         "[PLAY LIDAR] policy observation: "

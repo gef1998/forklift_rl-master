@@ -143,12 +143,12 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     #
     #   运动学 (二轮差速):
     #     v_lin  = (ω_L + ω_R) / 2 × wheel_radius
-    #     v_ang  = (ω_R - ω_L) / wheel_base × wheel_radius
+    #     v_ang  = (ω_R - ω_L) / track_width × wheel_radius
     #     wheel_radius = 0.07 m  (当前 USD 标称值)
-    #     wheel_base   = 0.43 m  (左右驱动轮横向中心距，不是 0.52 m 车体总宽)
+    #     track_width   = 0.43 m  (左右驱动轮横向中心距，不是 0.52 m 车体总宽)
     # ====================================================================
     wheel_radius: float = 0.07            # m
-    wheel_base: float = 0.43               # m，实际语义为 track width
+    track_width: float = 0.43              # m，左右驱动轮中心的横向距离
     wheel_max_velocity: float = 20.0       # rad/s
     # Effective material pairs use min on both sides: drive 0.8/0.6,
     # chassis 0.5/0.5, caster 0.02/0.02. Use PhysxMaterialAPI, not bare attrs.
@@ -197,11 +197,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Command headroom for measured tracking overshoot (settled start/reversal).
     # Keep the hardware specifications above distinct from this calibration.
     linear_acceleration_command_scale: float = 0.90
-    angular_acceleration_command_scale: float = 0.94
+    angular_acceleration_command_scale: float = 0.80
 
     sync_body_velocity_limits_to_wheels: bool = False
     max_linear_velocity: float = 0.7
-    max_angular_velocity: float = 1.5
+    max_angular_velocity: float = 1.2
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
     robot_half_length: float = 0.425        # 0.4115m physical half-length + safety margin
@@ -306,7 +306,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         min_connected_free_fraction=0.60,  # 所有课程端点仍位于最大连通域
         # 4096 并行环境中保留约 3.1% 为封闭直行绕障，避免少量样本被 PPO 批次稀释。
         # 每个 env 含 3 条独立线路，每线 3 个交错短墙并放置 3~6 个散障。
-        dedicated_detour_env_count=128,
+        dedicated_detour_env_count=512,
         dedicated_detour_lane_count=3,
         # 0.55 m 车宽在 0.60 m 净宽中每侧余量约 0.025 m；门洞按车体横向尺寸校验。
         # 每个课程等级独立配置门洞净宽。相邻两个等级共用同一条线路，但需要
@@ -443,9 +443,9 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     lidar_height: float = 0.12                  # LiDAR 安装高度
     lidar_offset_x: float = 0.0               # 偏前 (body +X=前进方向)
     lidar_offset_y: float = 0.0
-    # 策略观测的有效视场。训练默认保持完整 360°；play.py 会覆盖为
-    # 前向 ±110°，并将其余盲区填成固定 clearance。
-    lidar_observation_forward_half_fov_deg: float = 180.0
+    # 当前实车使用前向 220° 激光。训练、play、部署统一为 ±110°，
+    # 其余策略盲区填固定 clearance；物理扫描和碰撞检测仍保留 360°。
+    lidar_observation_forward_half_fov_deg: float = 110.0
     lidar_observation_blind_fill_clearance: float = 1.0
     debug_lidar_fov_fill: bool = False
 
@@ -489,16 +489,16 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Reward — 直接面向任务的六项奖励，无 VFH 教师
     # ====================================================================
     # 有正负的目标进度、近障、动作变化、时间、到达和失败。
-    goal_reach_bonus: float = 35.0
-    nav_failure_penalty: float = -25.0  # collision, fall or leaving the arena
-    collision_clearance_threshold: float = 0.01
+    goal_reach_bonus: float = 40.0
+    nav_failure_penalty: float = -30.0  # collision, fall or leaving the arena
+    collision_clearance_threshold: float = 0.010
     # Keep physical contacts and collision sensing enabled. At low curriculum
     # levels only mild-collision episode termination is relaxed.
     collision_termination_enabled_by_level: tuple[bool, ...] = (
-        False, False, False, False, True, True,
+        False, False, False, True, True, True,
     )
     max_nonterminal_collision_events_by_level: tuple[int, ...] = (
-        5, 4, 2, 1, 0, 0,
+        5, 3, 2, 0, 0, 0,
     )
     nonterminal_collision_event_penalty: float = -4.0
     collision_release_clearance: float = 0.03
@@ -540,20 +540,20 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     reference_path_max_progress_per_step: float = 0.10
     # Keep path following weak: no cost inside the tolerance and a bounded
     # per-second cost outside it, so obstacle avoidance can depart from the line.
-    reference_path_cross_track_tolerance: float = 0.05
-    reference_path_cross_track_full_cost_error: float = 0.25
-    reference_path_cross_track_cost_per_second: float = 0.15
+    reference_path_cross_track_tolerance: float = 0.0
+    reference_path_cross_track_full_cost_error: float = 0.05
+    reference_path_cross_track_cost_per_second: float = 1.35
     # Signed progress rewards forward / penalizes backward travel. This weak
     # extra term suppresses lateral motion; it fades out around a stop/rotation.
-    reference_path_velocity_direction_cost_per_second: float = 1.5  # 0 disables
-    reference_path_velocity_direction_tolerance_deg: float = 10.0
+    reference_path_velocity_direction_cost_per_second: float = 2.5  # 0 disables
+    reference_path_velocity_direction_tolerance_deg: float = 4.0
     reference_path_velocity_direction_min_speed: float = 0.05  # m/s
-    reference_path_velocity_direction_full_speed: float = 0.20  # m/s
+    reference_path_velocity_direction_full_speed: float = 0.15  # m/s
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.15
-    nav_proximity_cost_per_second: float = 0.075
+    nav_clearance_threshold: float = 0.25
+    nav_proximity_cost_per_second: float = 0.15
     nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.

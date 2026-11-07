@@ -91,7 +91,7 @@ ISAAC_PYTHON=/home/jz/isaacsim/python.sh \
 两种世界需要分别创建环境，因此场景切换发生在两次训练运行之间，不在同一
 进程内按 phase 热切换。
 
-轮速 actuator 上限与本体速度上限独立配置。当前默认 `wheel_max_velocity=10 rad/s`、`wheel_radius=0.09 m`、`wheel_base=0.40 m`，运营上限设为 `max_linear_velocity=0.9 m/s`、`max_angular_velocity=1.0 rad/s`；自动同步开关关闭，避免角速度在启动时被覆盖回运动学原地旋转极限 `4.5 rad/s`。两种 action mode 都会对左右轮做同比例投影，同时满足限制并保持曲率。
+轮速 actuator 上限与本体速度上限独立配置。当前默认 `wheel_max_velocity=10 rad/s`、`wheel_radius=0.09 m`、`track_width=0.40 m`，运营上限设为 `max_linear_velocity=0.9 m/s`、`max_angular_velocity=1.0 rad/s`；自动同步开关关闭，避免角速度在启动时被覆盖回运动学原地旋转极限 `4.5 rad/s`。两种 action mode 都会对左右轮做同比例投影，同时满足限制并保持曲率。
 
 Emma Nav 默认使用固定 25 Hz LiDAR 和 50 Hz 控制。ObsNav 的120维扇区按车体系物理方位排列：`index 0≈正前方 +1.5°`，随后逆时针经过左侧、后方和右侧；前向±110°实车视场对应保留 `0–36、83–119`，后方盲区为 `37–82`。可通过 Hydra override 切换消融模式：
 

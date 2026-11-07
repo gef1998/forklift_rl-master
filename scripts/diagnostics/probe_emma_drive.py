@@ -177,7 +177,7 @@ else:
         sign = -1 if args.reverse_at is not None and t >= args.reverse_at - 1e-8 else 1
         t = advance(action * sign, trace, t)
     tail = [row for row in trace if row["t"] >= max(0, t - 2.0) - 1e-8]
-    expected_yaw = -2 * args.target * cfg.wheel_radius / cfg.wheel_base
+    expected_yaw = -2 * args.target * cfg.wheel_radius / cfg.track_width
     final_sign = -1 if args.reverse_at is not None and t > args.reverse_at else 1
     mean_yaw = statistics.fmean(x["angular_b"][2] for x in tail)
     changes = []
@@ -188,7 +188,7 @@ else:
                         (b["angular_b"][2]-a["angular_b"][2])/dt))
         dl,dr = (b["target"][k]-a["target"][k] for k in (0,1))
         command_changes.append(((dl+dr)*cfg.wheel_radius/(2*dt),
-                                (dr-dl)*cfg.wheel_radius/(cfg.wheel_base*dt)))
+                                (dr-dl)*cfg.wheel_radius/(cfg.track_width*dt)))
     summary = dict(yaw_mean=mean_yaw,
         tracking_pct=100*mean_yaw/(expected_yaw*final_sign) if args.turn else None,
         forward_mean=statistics.fmean(x["velocity_b"][0] for x in tail),

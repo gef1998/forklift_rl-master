@@ -8,6 +8,7 @@ import math
 from pathlib import Path
 
 import torch
+import pytest
 
 
 MODULE_PATH = (
@@ -30,6 +31,55 @@ SPEC.loader.exec_module(async_lidar)
 def _angles(num_sectors: int = 4) -> torch.Tensor:
     width = 2.0 * math.pi / num_sectors
     return (torch.arange(num_sectors, dtype=torch.float32) + 0.5) * width
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("sectors", [120, 180])
+@pytest.mark.parametrize("scene", ["circle", "front_wall"])
+def test_real_bpearl_static_pool_and_warp_never_loses_hits(device, dtype, sectors, scene):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    angles = async_lidar.bpearl_planar_ray_angles(
+        1440, horizontal_fov_deg=360., horizontal_resolution_deg=.25, device=device
+    ).to(dtype).unsqueeze(0)
+    ranges = torch.full_like(angles, 2.)
+    if scene == "front_wall":
+        cosine = torch.cos(angles)
+        ranges = torch.where(cosine > .8, 1.0 / cosine.clamp_min(.01), 20.)
+    projection = async_lidar.rectangular_footprint_projection(angles, .425, .275, 0., 0.)
+    edges = None
+    if sectors == 180:
+        edges = async_lidar.hybrid_180_sector_edges(device=device, dtype=dtype)
+        pooled, selected, expected_clearance = async_lidar.min_pool_clearance_rays_grouped(
+            ranges, angles, projection, ((45, 4), (90, 12), (45, 4))
+        )
+    else:
+        pooled, selected, expected_clearance = async_lidar.min_pool_clearance_rays(
+            ranges, angles, projection, sectors
+        )
+    pose = torch.zeros((1, 3), device=device, dtype=dtype)
+    warped, clearance = async_lidar.warp_cached_ranges_and_clearances(
+        pooled, pose, pose, selected, sectors, 20., .425, .275, 0., 0., edges
+    )
+    valid = pooled < 20.
+    torch.testing.assert_close(warped[valid], pooled[valid], atol=2e-6, rtol=0.)
+    torch.testing.assert_close(clearance[valid], expected_clearance[valid], atol=2e-6, rtol=0.)
+
+
+@pytest.mark.parametrize("sectors", [120, 180])
+def test_sector_boundary_tolerance_is_circular_and_only_changes_near_boundaries(sectors):
+    edges = async_lidar.hybrid_180_sector_edges(device="cpu", dtype=torch.float64) if sectors == 180 else None
+    boundaries = edges if edges is not None else torch.arange(121, dtype=torch.float64) * (2*math.pi/120)
+    for delta in (-4e-6, -.25e-6, .25e-6, 4e-6):
+        angles = boundaries + delta
+        points = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1).unsqueeze(1)
+        ranges, _ = async_lidar.points_to_ranges_and_clearances(
+            points, sectors, 20., .425, .275, 0., 0., sector_edges=edges
+        )
+        expected = (torch.arange(sectors + 1) - int(delta < -1e-6)) % sectors
+        torch.testing.assert_close(ranges[torch.arange(sectors+1), expected], torch.ones(sectors+1, dtype=torch.float64))
+        assert (ranges < 20.).sum().item() == sectors+1
 
 
 def test_bpearl_raw_scan_starts_at_body_forward_and_turns_left():

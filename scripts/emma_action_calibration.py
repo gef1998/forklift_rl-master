@@ -117,24 +117,24 @@ def action_components(axis, value):
 
 
 def action_to_motion(action_0, action_1, max_linear_velocity,
-                     max_angular_velocity, wheel_radius, wheel_base,
+                     max_angular_velocity, wheel_radius, track_width,
                      wheel_max_velocity):
     values = (action_0, action_1, max_linear_velocity, max_angular_velocity,
-              wheel_radius, wheel_base, wheel_max_velocity)
-    if not all(finite(x) for x in values) or min(wheel_radius, wheel_base, wheel_max_velocity) <= 0.0:
+              wheel_radius, track_width, wheel_max_velocity)
+    if not all(finite(x) for x in values) or min(wheel_radius, track_width, wheel_max_velocity) <= 0.0:
         raise ValueError("action conversion parameters are invalid")
     action_0 = max(-1.0, min(1.0, float(action_0)))
     action_1 = max(-1.0, min(1.0, float(action_1)))
     vx = action_0 * float(max_linear_velocity)
     wz = action_1 * float(max_angular_velocity)
-    left = (vx - 0.5 * float(wheel_base) * wz) / float(wheel_radius)
-    right = (vx + 0.5 * float(wheel_base) * wz) / float(wheel_radius)
+    left = (vx - 0.5 * float(track_width) * wz) / float(wheel_radius)
+    right = (vx + 0.5 * float(track_width) * wz) / float(wheel_radius)
     scale = min(1.0, float(wheel_max_velocity) /
                 max(abs(left), abs(right), 1.0e-12))
     left *= scale
     right *= scale
     vx = 0.5 * float(wheel_radius) * (left + right)
-    wz = float(wheel_radius) * (right - left) / float(wheel_base)
+    wz = float(wheel_radius) * (right - left) / float(track_width)
     return {
         "vx_mps": vx, "wz_radps": wz,
         "left_radps": left, "right_radps": right,

@@ -36,30 +36,30 @@ def _effective_radius(
 def _wheel_velocities_to_twist(
     wheel_velocities: torch.Tensor,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     wheel_radius_scale: torch.Tensor | None,
 ) -> torch.Tensor:
     radius = _effective_radius(wheel_velocities, wheel_radius, wheel_radius_scale)
     left = wheel_velocities[:, 0]
     right = wheel_velocities[:, 1]
     linear = 0.5 * radius * (left + right)
-    angular = radius * (right - left) / wheel_base
+    angular = radius * (right - left) / track_width
     return torch.stack((linear, angular), dim=-1)
 
 
 def _twist_to_feasible_wheels(
     twist: torch.Tensor,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     wheel_max_velocity: float,
     wheel_radius_scale: torch.Tensor | None,
 ) -> torch.Tensor:
     radius = _effective_radius(twist, wheel_radius, wheel_radius_scale)
-    half_base = wheel_base / 2.0
+    half_track = track_width / 2.0
     wheels = torch.stack(
         (
-            (twist[:, 0] - twist[:, 1] * half_base) / radius,
-            (twist[:, 0] + twist[:, 1] * half_base) / radius,
+            (twist[:, 0] - twist[:, 1] * half_track) / radius,
+            (twist[:, 0] + twist[:, 1] * half_track) / radius,
         ),
         dim=-1,
     )
@@ -75,7 +75,7 @@ def apply_safety_control(
     shield_aoi: torch.Tensor,
     *,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     wheel_max_velocity: float,
     forward_half_angle_deg: float,
     stop_clearance: float,
@@ -112,7 +112,7 @@ def apply_safety_control(
 
     positive = {
         "wheel_radius": wheel_radius,
-        "wheel_base": wheel_base,
+        "track_width": track_width,
         "wheel_max_velocity": wheel_max_velocity,
         "forward_half_angle_deg": forward_half_angle_deg,
         "full_speed_clearance": full_speed_clearance,
@@ -139,7 +139,7 @@ def apply_safety_control(
         torch.isfinite(wheel_targets), wheel_targets, torch.zeros_like(wheel_targets)
     )
     raw_twist = _wheel_velocities_to_twist(
-        candidate_wheels, wheel_radius, wheel_base, wheel_radius_scale
+        candidate_wheels, wheel_radius, track_width, wheel_radius_scale
     )
 
     finite_sectors = torch.isfinite(shield_clearance) & torch.isfinite(angles)
@@ -194,7 +194,7 @@ def apply_safety_control(
     safe_wheels = _twist_to_feasible_wheels(
         safe_twist_target,
         wheel_radius,
-        wheel_base,
+        track_width,
         wheel_max_velocity,
         wheel_radius_scale,
     )
@@ -202,7 +202,7 @@ def apply_safety_control(
         finite_wheels.unsqueeze(-1), safe_wheels, torch.zeros_like(safe_wheels)
     )
     safe_twist = _wheel_velocities_to_twist(
-        safe_wheels, wheel_radius, wheel_base, wheel_radius_scale
+        safe_wheels, wheel_radius, track_width, wheel_radius_scale
     )
     intervention = enabled & forward_motion & (forward_scale < 1.0 - 1.0e-6)
 

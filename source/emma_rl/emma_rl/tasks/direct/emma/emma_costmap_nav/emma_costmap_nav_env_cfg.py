@@ -95,11 +95,11 @@ class EmmaCostmapNavEnvCfg(DirectRLEnvCfg):
     # Robot — Emma AMR (与 emma_obs_nav 相同)
     # ========================================================================
     wheel_radius: float = 0.09
-    wheel_base: float = 0.52
+    track_width: float = 0.52
     wheel_max_velocity: float = 30.0
     max_linear_velocity: float = wheel_max_velocity * wheel_radius       # ≈ 1.8 m/s
     max_angular_velocity: float = (
-        2.0 * wheel_max_velocity * wheel_radius / wheel_base)             # ≈ 6.92 rad/s
+        2.0 * wheel_max_velocity * wheel_radius / track_width)             # ≈ 6.92 rad/s
 
     robot_half_length: float = 0.42
     robot_half_width: float = 0.267

@@ -7,6 +7,35 @@ import math
 import torch
 
 
+# Shared with deployment's kSectorBoundaryTolerance. This is only a binning
+# tolerance (0.000057 degrees), never a change to the measured hit geometry.
+_SECTOR_BOUNDARY_TOLERANCE = 1.0e-6
+
+
+def _sector_indices(
+    angles: torch.Tensor,
+    num_sectors: int,
+    sector_edges: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Use circular, right-inclusive boundary assignment across CPU/CUDA/double.
+
+    atan2(sin(a), cos(a)) can round an exact boundary slightly to its left.
+    Assign points within 1e-6 rad below a boundary to its right-hand sector;
+    wrap the 2*pi boundary back to sector zero. Keep original angles for all
+    range/footprint calculations so only numerically ambiguous bins change.
+    """
+    index_angles = torch.remainder(
+        angles + _SECTOR_BOUNDARY_TOLERANCE, 2.0 * math.pi
+    )
+    if sector_edges is None:
+        return torch.floor(index_angles / (2.0 * math.pi / num_sectors)).long().clamp_(
+            0, num_sectors - 1
+        )
+    return torch.bucketize(
+        index_angles.contiguous(), sector_edges[1:-1].contiguous(), right=True
+    ).clamp_(0, num_sectors - 1)
+
+
 def bpearl_planar_ray_angles(
     num_rays: int,
     *,
@@ -316,8 +345,7 @@ def points_to_ranges(
 
     ranges = torch.linalg.norm(points, dim=-1)
     angles = torch.remainder(torch.atan2(points[..., 1], points[..., 0]), 2.0 * math.pi)
-    sector_width = 2.0 * math.pi / num_sectors
-    indices = torch.floor(angles / sector_width).long().clamp_(0, num_sectors - 1)
+    indices = _sector_indices(angles, num_sectors)
 
     valid = (ranges > 1.0e-6) & (ranges < max_range)
     if valid_mask is not None:
@@ -381,9 +409,7 @@ def points_to_ranges_and_clearances(
         torch.atan2(points[..., 1], points[..., 0]), 2.0 * math.pi)
     if sector_edges is None:
         sector_width = 2.0 * math.pi / num_sectors
-        indices = torch.floor(point_angles / sector_width).long().clamp_(
-            0, num_sectors - 1
-        )
+        indices = _sector_indices(point_angles, num_sectors)
         sector_centers = (
             torch.arange(num_sectors, device=points.device, dtype=points.dtype) + 0.5
         ) * sector_width
@@ -391,9 +417,7 @@ def points_to_ranges_and_clearances(
         sector_edges = sector_edges.to(device=points.device, dtype=points.dtype)
         if sector_edges.ndim != 1 or sector_edges.numel() != num_sectors + 1:
             raise ValueError("sector_edges must contain num_sectors + 1 values")
-        indices = torch.bucketize(
-            point_angles.contiguous(), sector_edges[1:-1].contiguous(), right=True
-        ).clamp_(0, num_sectors - 1)
+        indices = _sector_indices(point_angles, num_sectors, sector_edges)
         sector_centers = (sector_edges[:-1] + sector_edges[1:]) * 0.5
 
     valid = (point_ranges > 1.0e-6) & (point_ranges < max_range)

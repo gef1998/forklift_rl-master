@@ -16,5 +16,19 @@
             "justMyCode": false,
             "console": "integratedTerminal"
         },
+        {
+            "name": "export",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "/home/jz/isaacsim/python.sh",
+            "program": "${workspaceFolder}/scripts/skrl/export.py",
+            "args": [
+                "--checkpoint", "logs/skrl/emma_obs_nav_gru_direct/2026-11-01_21-42-17_ppo_torch/checkpoints/agent_1000000.pt",
+                "--task", "Emma-RL-ObsNav-GRU-Hybrid180-Direct-v0",
+            ],
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        },
+
     ]
 }

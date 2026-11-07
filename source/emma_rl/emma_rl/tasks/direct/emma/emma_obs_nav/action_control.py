@@ -34,7 +34,7 @@ def limit_wheel_velocity_acceleration(
     previous_wheels: torch.Tensor,
     dt: float,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     max_linear_acceleration: float,
     max_angular_acceleration: float,
     wheel_radius_scale: torch.Tensor | None = None,
@@ -55,7 +55,7 @@ def limit_wheel_velocity_acceleration(
         raise ValueError("dt and acceleration limits must be finite and positive")
     delta_wheels = desired_wheels - previous_wheels
     delta_twist = wheel_velocities_to_body_twist(
-        delta_wheels, wheel_radius, wheel_base, wheel_radius_scale
+        delta_wheels, wheel_radius, track_width, wheel_radius_scale
     )
     linear_scale = (max_linear_acceleration * dt / delta_twist[..., 0].abs().clamp_min(1e-8))
     angular_scale = (max_angular_acceleration * dt / delta_twist[..., 1].abs().clamp_min(1e-8))
@@ -66,19 +66,18 @@ def limit_wheel_velocity_acceleration(
 def differential_drive_kinematic_limits(
     wheel_max_velocity: float,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
 ) -> tuple[float, float]:
     """返回轮速上限对应的直行和原地旋转运动学极限。
 
-    ``wheel_base`` 在本项目中表示左右驱动轮接地点的横向中心距
-    （track width），不是车辆前后方向的轴距。
+    ``track_width`` 表示左右驱动轮中心的横向距离，单位 m。
     """
 
-    if wheel_max_velocity <= 0 or wheel_radius <= 0 or wheel_base <= 0:
+    if wheel_max_velocity <= 0 or wheel_radius <= 0 or track_width <= 0:
         raise ValueError("wheel limit, radius, and track width must be positive")
     max_linear_velocity = wheel_max_velocity * wheel_radius
     max_angular_velocity = (
-        2.0 * wheel_max_velocity * wheel_radius / wheel_base
+        2.0 * wheel_max_velocity * wheel_radius / track_width
     )
     return max_linear_velocity, max_angular_velocity
 
@@ -100,7 +99,7 @@ def actions_to_raw_wheel_velocities(
     control_mode: str,
     wheel_max_velocity: float,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     max_linear_velocity: float,
     max_angular_velocity: float,
     wheel_radius_scale: torch.Tensor | None = None,
@@ -114,8 +113,8 @@ def actions_to_raw_wheel_velocities(
 
     if actions.shape[-1] != 2:
         raise ValueError("Emma actions must have exactly two components")
-    if wheel_max_velocity <= 0 or wheel_radius <= 0 or wheel_base <= 0:
-        raise ValueError("wheel limits, radius, and base must be positive")
+    if wheel_max_velocity <= 0 or wheel_radius <= 0 or track_width <= 0:
+        raise ValueError("wheel limits, radius, and track width must be positive")
     if max_linear_velocity <= 0 or max_angular_velocity <= 0:
         raise ValueError("body velocity limits must be positive")
 
@@ -132,9 +131,9 @@ def actions_to_raw_wheel_velocities(
 
     linear_velocity = signed_actions[..., 0] * max_linear_velocity
     angular_velocity = signed_actions[..., 1] * max_angular_velocity
-    half_base = wheel_base / 2.0
-    left = (linear_velocity - angular_velocity * half_base) / effective_radius
-    right = (linear_velocity + angular_velocity * half_base) / effective_radius
+    half_track = track_width / 2.0
+    left = (linear_velocity - angular_velocity * half_track) / effective_radius
+    right = (linear_velocity + angular_velocity * half_track) / effective_radius
     return torch.stack((left, right), dim=-1)
 
 
@@ -158,7 +157,7 @@ def project_wheel_velocities_to_motion_limits(
     wheel_velocities: torch.Tensor,
     wheel_max_velocity: float,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     max_linear_velocity: float,
     max_angular_velocity: float,
     wheel_radius_scale: torch.Tensor | None = None,
@@ -177,7 +176,7 @@ def project_wheel_velocities_to_motion_limits(
     twist = wheel_velocities_to_body_twist(
         wheel_velocities,
         wheel_radius,
-        wheel_base,
+        track_width,
         wheel_radius_scale,
     )
     linear_peak = twist[..., 0].abs()
@@ -201,15 +200,15 @@ def project_wheel_velocities_to_motion_limits(
 def wheel_velocities_to_body_twist(
     wheel_velocities: torch.Tensor,
     wheel_radius: float,
-    wheel_base: float,
+    track_width: float,
     wheel_radius_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Convert left/right wheel angular velocity to body ``(v, omega)``."""
 
     if wheel_velocities.shape[-1] != 2:
         raise ValueError("wheel_velocities must end with (left, right)")
-    if wheel_radius <= 0 or wheel_base <= 0:
-        raise ValueError("wheel_radius and wheel_base must be positive")
+    if wheel_radius <= 0 or track_width <= 0:
+        raise ValueError("wheel_radius and track_width must be positive")
 
     effective_radius = wheel_velocities.new_tensor(wheel_radius)
     if wheel_radius_scale is not None:
@@ -220,5 +219,5 @@ def wheel_velocities_to_body_twist(
     left = wheel_velocities[..., 0]
     right = wheel_velocities[..., 1]
     linear_velocity = 0.5 * effective_radius * (left + right)
-    angular_velocity = effective_radius * (right - left) / wheel_base
+    angular_velocity = effective_radius * (right - left) / track_width
     return torch.stack((linear_velocity, angular_velocity), dim=-1)

@@ -29,7 +29,7 @@ SPEC.loader.exec_module(action_control)
 
 WHEEL_MAX = 10.0
 WHEEL_RADIUS = 0.09
-WHEEL_BASE = 0.40
+TRACK_WIDTH = 0.40
 LINEAR_MAX = 0.2
 ANGULAR_MAX = 0.2
 
@@ -40,7 +40,7 @@ def _map(actions: torch.Tensor, mode: str) -> torch.Tensor:
         mode,
         WHEEL_MAX,
         WHEEL_RADIUS,
-        WHEEL_BASE,
+        TRACK_WIDTH,
         LINEAR_MAX,
         ANGULAR_MAX,
     )
@@ -51,7 +51,7 @@ def _project(wheels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         wheels,
         WHEEL_MAX,
         WHEEL_RADIUS,
-        WHEEL_BASE,
+        TRACK_WIDTH,
         LINEAR_MAX,
         ANGULAR_MAX,
     )
@@ -59,18 +59,18 @@ def _project(wheels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def _twist(wheels: torch.Tensor) -> torch.Tensor:
     return action_control.wheel_velocities_to_body_twist(
-        wheels, WHEEL_RADIUS, WHEEL_BASE
+        wheels, WHEEL_RADIUS, TRACK_WIDTH
     )
 
 
 def test_kinematic_limits_match_straight_and_spin_wheel_commands():
     linear_max, angular_max = (
         action_control.differential_drive_kinematic_limits(
-            WHEEL_MAX, WHEEL_RADIUS, WHEEL_BASE
+            WHEEL_MAX, WHEEL_RADIUS, TRACK_WIDTH
         )
     )
     assert abs(linear_max - 0.9) < 1.0e-9
-    expected_angular = 2.0 * WHEEL_MAX * WHEEL_RADIUS / WHEEL_BASE
+    expected_angular = 2.0 * WHEEL_MAX * WHEEL_RADIUS / TRACK_WIDTH
     assert abs(angular_max - expected_angular) < 1.0e-9
 
     straight = _twist(torch.tensor([[WHEEL_MAX, WHEEL_MAX]]))[0]
@@ -182,14 +182,14 @@ def test_acceleration_interpolation_stays_in_speed_feasible_set():
     previous, _ = _project((torch.rand(1024, 2, generator=generator) - 0.5) * 40)
     desired, _ = _project((torch.rand(1024, 2, generator=generator) - 0.5) * 40)
     result, _ = action_control.limit_wheel_velocity_acceleration(
-        desired, previous, 0.02, WHEEL_RADIUS, WHEEL_BASE, 1.0, 2.0
+        desired, previous, 0.02, WHEEL_RADIUS, TRACK_WIDTH, 1.0, 2.0
     )
     twist = _twist(result)
     assert torch.all(result.abs() <= WHEEL_MAX + 1e-6)
     assert torch.all(twist[:, 0].abs() <= LINEAR_MAX + 1e-6)
     assert torch.all(twist[:, 1].abs() <= ANGULAR_MAX + 1e-6)
     unchanged, scale = action_control.limit_wheel_velocity_acceleration(
-        previous, previous, 0.02, WHEEL_RADIUS, WHEEL_BASE, 1.0, 2.0
+        previous, previous, 0.02, WHEEL_RADIUS, TRACK_WIDTH, 1.0, 2.0
     )
     torch.testing.assert_close(unchanged, previous)
     torch.testing.assert_close(scale, torch.ones_like(scale))
@@ -202,7 +202,7 @@ def test_acceleration_interpolation_stays_in_speed_feasible_set():
 # base was calibrated to track.
 NAV_WHEEL_MAX = 20.0
 NAV_WHEEL_RADIUS = 0.05
-NAV_WHEEL_BASE = 0.43
+NAV_TRACK_WIDTH = 0.43
 NAV_LINEAR_MAX = 0.5
 NAV_ANGULAR_MAX = 1.5
 NAV_STEP_DT = 0.02
@@ -216,7 +216,7 @@ def _nav_desired_wheels(actions: torch.Tensor) -> torch.Tensor:
         "body_twist",
         NAV_WHEEL_MAX,
         NAV_WHEEL_RADIUS,
-        NAV_WHEEL_BASE,
+        NAV_TRACK_WIDTH,
         NAV_LINEAR_MAX,
         NAV_ANGULAR_MAX,
     )
@@ -224,7 +224,7 @@ def _nav_desired_wheels(actions: torch.Tensor) -> torch.Tensor:
 
 def _nav_yaw_of(wheels: torch.Tensor) -> torch.Tensor:
     return action_control.wheel_velocities_to_body_twist(
-        wheels, NAV_WHEEL_RADIUS, NAV_WHEEL_BASE
+        wheels, NAV_WHEEL_RADIUS, NAV_TRACK_WIDTH
     )[..., 1]
 
 
@@ -237,7 +237,7 @@ def _run_rate_limit(desired: torch.Tensor, start: torch.Tensor) -> torch.Tensor:
             previous,
             NAV_STEP_DT,
             NAV_WHEEL_RADIUS,
-            NAV_WHEEL_BASE,
+            NAV_TRACK_WIDTH,
             NAV_LINEAR_ACCEL_LIMIT,
             NAV_ANGULAR_ACCEL_LIMIT,
         )
