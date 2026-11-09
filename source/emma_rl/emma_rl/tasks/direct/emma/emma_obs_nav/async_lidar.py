@@ -12,6 +12,39 @@ import torch
 _SECTOR_BOUNDARY_TOLERANCE = 1.0e-6
 
 
+def lidar_sampling_layout(
+    horizontal_resolution_deg: float,
+    policy_layout: str,
+) -> tuple[int, int, tuple[tuple[int, int], ...]]:
+    """Derive full-circle ray count, 3-degree pooling, and policy groups.
+
+    The resolution must divide every sector width exactly. The network's
+    120/180 output sectors stay unchanged when raw ray density changes.
+    """
+    if not math.isfinite(horizontal_resolution_deg) or horizontal_resolution_deg <= 0.:
+        raise ValueError("LiDAR horizontal resolution must be finite and positive")
+    layout = policy_layout.strip().lower()
+    if layout not in ("uniform_120", "hybrid_180"):
+        raise ValueError("policy LiDAR layout must be uniform_120 or hybrid_180")
+
+    def ray_count(width: float) -> int:
+        count = width / horizontal_resolution_deg
+        rounded = round(count)
+        if rounded < 1 or not math.isclose(count, rounded, rel_tol=0., abs_tol=1e-8):
+            raise ValueError(
+                f"LiDAR resolution {horizontal_resolution_deg} deg must divide {width:g}-degree sectors"
+            )
+        return rounded
+
+    num_rays, uniform_rays = ray_count(360.), ray_count(3.)
+    if layout == "hybrid_180":
+        front_rays = ray_count(1.)
+        groups = ((45, front_rays), (90, uniform_rays), (45, front_rays))
+    else:
+        groups = ((120, uniform_rays),)
+    return num_rays, uniform_rays, groups
+
+
 def _sector_indices(
     angles: torch.Tensor,
     num_sectors: int,

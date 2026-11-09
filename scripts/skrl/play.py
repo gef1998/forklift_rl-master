@@ -113,10 +113,10 @@ parser.add_argument(
     "--lidar_forward_half_fov_deg",
     dest="lidar_forward_half_fov_deg",
     type=float,
-    default=110.0,
+    default=180.0,
     help=(
         "Policy-observation LiDAR half-FOV around robot forward in degrees "
-        "(default: 110, matching the real 220-degree sensor; use 180 for 360 degrees)."
+        "(default: 180, matching the real 380-degree sensor; use 180 for 360 degrees)."
     ),
 )
 parser.add_argument(

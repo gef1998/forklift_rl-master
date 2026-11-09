@@ -33,15 +33,54 @@ def _angles(num_sectors: int = 4) -> torch.Tensor:
     return (torch.arange(num_sectors, dtype=torch.float32) + 0.5) * width
 
 
+@pytest.mark.parametrize("resolution,count,coarse,groups", [
+    (.5, 720, 6, ((45,2),(90,6),(45,2))),
+    (.25, 1440, 12, ((45,4),(90,12),(45,4))),
+    (.2, 1800, 15, ((45,5),(90,15),(45,5))),
+])
+def test_sampling_layout_keeps_policy_geometry(resolution, count, coarse, groups):
+    assert async_lidar.lidar_sampling_layout(resolution, "hybrid_180") == (count, coarse, groups)
+    assert async_lidar.lidar_sampling_layout(resolution, "uniform_120") == (count, coarse, ((120,coarse),))
+    assert sum(n*r for n,r in groups) == count
+
+
+@pytest.mark.parametrize("resolution,layout", [
+    (0., "hybrid_180"), (-.5,"uniform_120"), (math.nan,"uniform_120"),
+    (math.inf,"hybrid_180"), (.4,"hybrid_180"), (.3,"hybrid_180"), (.5,"unknown"),
+])
+def test_invalid_sampling_layouts_fail_before_building_raycaster(resolution, layout):
+    with pytest.raises(ValueError):
+        async_lidar.lidar_sampling_layout(resolution, layout)
+
+
+def test_ten_hz_sensor_schedule_retains_fifty_hz_control_and_growing_aoi():
+    period = torch.tensor([.1])
+    next_timestamp = period.clone()
+    cached_stamp = torch.zeros(1)
+    due_steps, ages = [], []
+    for step in range(1, 51):
+        now = torch.tensor([step*.02])
+        due = async_lidar.sensor_due_mask(now, next_timestamp)
+        if due.item():
+            cached_stamp.copy_(now)
+            due_steps.append(step)
+        ages.append(async_lidar.compute_aoi(now, cached_stamp).item())
+        next_timestamp = async_lidar.advance_sensor_schedule(now,next_timestamp,period,due,.02)
+    assert due_steps == list(range(5, 51, 5))
+    assert max(ages) == pytest.approx(.08, abs=1e-6)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("sectors", [120, 180])
 @pytest.mark.parametrize("scene", ["circle", "front_wall"])
-def test_real_bpearl_static_pool_and_warp_never_loses_hits(device, dtype, sectors, scene):
+@pytest.mark.parametrize("resolution", [.25, .5])
+def test_real_bpearl_static_pool_and_warp_never_loses_hits(device, dtype, sectors, scene, resolution):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
+    count, _, groups = async_lidar.lidar_sampling_layout(resolution, "hybrid_180" if sectors == 180 else "uniform_120")
     angles = async_lidar.bpearl_planar_ray_angles(
-        1440, horizontal_fov_deg=360., horizontal_resolution_deg=.25, device=device
+        count, horizontal_fov_deg=360., horizontal_resolution_deg=resolution, device=device
     ).to(dtype).unsqueeze(0)
     ranges = torch.full_like(angles, 2.)
     if scene == "front_wall":
@@ -52,7 +91,7 @@ def test_real_bpearl_static_pool_and_warp_never_loses_hits(device, dtype, sector
     if sectors == 180:
         edges = async_lidar.hybrid_180_sector_edges(device=device, dtype=dtype)
         pooled, selected, expected_clearance = async_lidar.min_pool_clearance_rays_grouped(
-            ranges, angles, projection, ((45, 4), (90, 12), (45, 4))
+            ranges, angles, projection, groups
         )
     else:
         pooled, selected, expected_clearance = async_lidar.min_pool_clearance_rays(
@@ -82,20 +121,22 @@ def test_sector_boundary_tolerance_is_circular_and_only_changes_near_boundaries(
         assert (ranges < 20.).sum().item() == sectors+1
 
 
-def test_bpearl_raw_scan_starts_at_body_forward_and_turns_left():
+@pytest.mark.parametrize("resolution", [.25, .5])
+def test_bpearl_raw_scan_starts_at_body_forward_and_turns_left(resolution):
+    count = round(360./resolution)
     angles = async_lidar.bpearl_planar_ray_angles(
-        1440,
+        count,
         horizontal_fov_deg=360.0,
-        horizontal_resolution_deg=0.25,
+        horizontal_resolution_deg=resolution,
         device="cpu",
     )
     torch.testing.assert_close(angles[0], torch.tensor(0.0), atol=1.0e-6, rtol=0.0)
     torch.testing.assert_close(
-        angles[360], torch.tensor(math.pi / 2.0), atol=1.0e-6, rtol=0.0
+        angles[count//4], torch.tensor(math.pi / 2.0), atol=1.0e-6, rtol=0.0
     )
-    assert abs(abs(angles[720].item()) - math.pi) < 1.0e-6
+    assert abs(abs(angles[count//2].item()) - math.pi) < 1.0e-6
     torch.testing.assert_close(
-        angles[1080], torch.tensor(-math.pi / 2.0), atol=1.0e-6, rtol=0.0
+        angles[3*count//4], torch.tensor(-math.pi / 2.0), atol=1.0e-6, rtol=0.0
     )
 
 
@@ -117,25 +158,28 @@ def test_hybrid_180_layout_has_one_degree_front_and_three_degree_elsewhere():
     torch.testing.assert_close(centers[-1], torch.tensor(359.5), atol=5.0e-5, rtol=0.0)
 
 
-def test_hybrid_180_grouped_pooling_produces_180_sectors():
+@pytest.mark.parametrize("resolution", [.25, .5])
+def test_hybrid_180_grouped_pooling_produces_180_sectors(resolution):
+    count, coarse, groups = async_lidar.lidar_sampling_layout(resolution, "hybrid_180")
+    fine = groups[0][1]
     angles = async_lidar.bpearl_planar_ray_angles(
-        1440,
+        count,
         horizontal_fov_deg=360.0,
-        horizontal_resolution_deg=0.25,
+        horizontal_resolution_deg=resolution,
         device="cpu",
     ).unsqueeze(0)
     ranges = torch.full_like(angles, 10.0)
     projection = torch.zeros_like(angles)
-    ranges[0, 3] = 1.0
-    ranges[0, 180 + 11] = 2.0
-    ranges[0, 1260 + 2] = 3.0
+    ranges[0, fine-1] = 1.0
+    ranges[0, 45*fine + coarse-1] = 2.0
+    ranges[0, 45*fine + 90*coarse + fine-1] = 3.0
 
     pooled_ranges, pooled_angles, pooled_clearance = (
         async_lidar.min_pool_clearance_rays_grouped(
             ranges,
             angles,
             projection,
-            ((45, 4), (90, 12), (45, 4)),
+            groups,
         )
     )
     assert pooled_ranges.shape == (1, 180)

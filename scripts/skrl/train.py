@@ -129,6 +129,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    # Hydra may change ray resolution after config construction. Persist the
+    # same derived counts that the environment will actually use.
+    if hasattr(env_cfg, "configure_lidar_sampling"):
+        env_cfg.configure_lidar_sampling()
 
     # multi-gpu training config
     if args_cli.distributed:

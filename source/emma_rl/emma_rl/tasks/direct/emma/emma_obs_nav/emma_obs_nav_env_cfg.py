@@ -27,6 +27,7 @@ from isaaclab.sensors.ray_caster.patterns import BpearlPatternCfg
 from isaaclab.utils import configclass
 
 from ..asset_paths import resolve_asset
+from .async_lidar import lidar_sampling_layout
 from .emma_obs_nav_corridor_world import CorridorWorldConfig
 from .emma_obs_nav_random_obstacle_world import RandomObstacleWorldConfig
 from .emma_obs_nav_straight_obstacle_world import StraightObstacleWorldConfig
@@ -425,27 +426,27 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     safety_control: SafetyControlCfg = SafetyControlCfg()
 
     # ====================================================================
-    # LiDAR — 0.25° 射线 + 3° 扇区 min-pool (360° FOV)
-    #   1440 rays @ 0.25° → reshape → (120, 12) → min → 120 robust sectors
+    # LiDAR — 默认 0.5° / 720 射线，物理扫描保持 360°
+    #   horizontal_res 是唯一射线密度配置；下列计数由 configure_lidar_sampling 推导。
     #   噪声加在原始距离上 (模拟传感器误差), min-pool 后再做 dropout
     # ====================================================================
-    num_lidar_rays: int = 1440                  # 内部射线数 (360° / 0.25°)
+    num_lidar_rays: int = 720                   # derived: 360° / horizontal_res
     # Policy sectors may use either uniform 3-degree pooling or the hybrid-180
     # layout. The policy-internal safety controller always retains an independent
     # uniform 120-sector scan so changing network resolution does not also change
     # the shield semantics.
     lidar_policy_sector_layout: str = "uniform_120"
     lidar_output_sectors: int = 120              # policy observation sectors
-    lidar_rays_per_sector: int = 12              # uniform-120 compatibility
+    lidar_rays_per_sector: int = 6               # derived: 3° / horizontal_res
     lidar_safety_output_sectors: int = 120
-    lidar_safety_rays_per_sector: int = 12
+    lidar_safety_rays_per_sector: int = 6        # derived: 3° / horizontal_res
     lidar_max_distance: float = 20.0
     lidar_height: float = 0.12                  # LiDAR 安装高度
     lidar_offset_x: float = 0.0               # 偏前 (body +X=前进方向)
     lidar_offset_y: float = 0.0
     # 当前实车使用前向 220° 激光。训练、play、部署统一为 ±110°，
     # 其余策略盲区填固定 clearance；物理扫描和碰撞检测仍保留 360°。
-    lidar_observation_forward_half_fov_deg: float = 110.0
+    lidar_observation_forward_half_fov_deg: float = 180.0
     lidar_observation_blind_fill_clearance: float = 1.0
     debug_lidar_fov_fill: bool = False
 
@@ -453,7 +454,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # "random": sample a frequency independently per env — policy learns to
     #           interpret AoI and degrade gracefully with stale observations.
     lidar_sensor_mode: str = "fixed"
-    lidar_fixed_frequency_hz: float = 25.0
+    lidar_fixed_frequency_hz: float = 10.0
     lidar_frequency_choices_hz: tuple[float, ...] = (10.0, 12.5, 16.6667, 20.0, 25.0, 50.0)
     lidar_latency_range_s: tuple[float, float] = (0.01, 0.06)   # 10–60 ms transport latency
     lidar_jitter_max_steps: int = 2                              # ±2 steps (0–40 ms) random jitter
@@ -471,7 +472,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         ray_alignment="base",
         pattern_cfg=BpearlPatternCfg(
             horizontal_fov=360.0,                # 0°为正前方，逆时针转
-            horizontal_res=0.25,                 # 0.25° 精度 (真实 LiDAR 级别)
+            horizontal_res=0.5,                  # raw rays; policy remains 1°/3°
             vertical_ray_angles=[0.0],
         ),
         mesh_prim_paths=["/World/groundPlane"],
@@ -559,6 +560,22 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.
     nav_action_change_scale: float = 0.08
+
+
+    def __post_init__(self):
+        self.configure_lidar_sampling()
+
+    def configure_lidar_sampling(self) -> tuple[tuple[int, int], ...]:
+        """Refresh derived counts after construction or CLI/Hydra overrides."""
+        if not math.isclose(self.lidar.pattern_cfg.horizontal_fov, 360., rel_tol=0., abs_tol=1e-6):
+            raise ValueError("physical LiDAR must retain 360 degrees for clean collision checks")
+        self.lidar_policy_sector_layout = self.lidar_policy_sector_layout.strip().lower()
+        self.num_lidar_rays, rays_per_sector, groups = lidar_sampling_layout(
+            self.lidar.pattern_cfg.horizontal_res, self.lidar_policy_sector_layout
+        )
+        self.lidar_rays_per_sector = rays_per_sector
+        self.lidar_safety_rays_per_sector = rays_per_sector
+        return groups
 
 
 @configclass

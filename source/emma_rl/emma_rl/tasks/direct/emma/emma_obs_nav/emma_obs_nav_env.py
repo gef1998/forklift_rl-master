@@ -123,18 +123,12 @@ class EmmaObsNavEnv(DirectRLEnv):
                 "lidar_policy_sector_layout must be 'uniform_120' or 'hybrid_180'"
             )
         cfg.lidar_policy_sector_layout = policy_lidar_layout
-        if policy_lidar_layout == "uniform_120":
-            if cfg.lidar_output_sectors != 120 or cfg.lidar_rays_per_sector != 12:
-                raise ValueError("uniform_120 requires 120 sectors with 12 rays each")
-        elif cfg.lidar_output_sectors != 180 or cfg.num_lidar_rays != 1440:
-            raise ValueError("hybrid_180 requires 180 policy sectors and 1440 rays")
-        if (
-            cfg.lidar_safety_output_sectors != 120
-            or cfg.lidar_safety_rays_per_sector != 12
-            or cfg.num_lidar_rays
-            != cfg.lidar_safety_output_sectors * cfg.lidar_safety_rays_per_sector
-        ):
-            raise ValueError("the safety scan must remain uniform 120 x 12 rays")
+        policy_sector_groups = cfg.configure_lidar_sampling()
+        expected_sectors = 120 if policy_lidar_layout == "uniform_120" else 180
+        if cfg.lidar_output_sectors != expected_sectors:
+            raise ValueError(f"{policy_lidar_layout} requires {expected_sectors} policy sectors")
+        if cfg.lidar_safety_output_sectors != 120:
+            raise ValueError("the safety scan must remain uniform 120 sectors")
         # 必须在 super().__init__() 之前设置 (因为 _setup_scene 在 super 内调用)
         self._world_mode = cfg.world_mode.strip().lower()
         if self._world_mode not in (
@@ -300,7 +294,10 @@ class EmmaObsNavEnv(DirectRLEnv):
             f"[LiDAR] policy_layout={self.cfg.lidar_policy_sector_layout} "
             f"policy_sectors={self.cfg.lidar_output_sectors} "
             f"safety_sectors={self.cfg.lidar_safety_output_sectors} "
-            f"raw_rays={self.cfg.num_lidar_rays}"
+            f"raw_rays={self.cfg.num_lidar_rays} "
+            f"ray_res={self.cfg.lidar.pattern_cfg.horizontal_res:g}deg "
+            f"sensor_mode={self.cfg.lidar_sensor_mode} "
+            f"nominal_hz={self.cfg.lidar_fixed_frequency_hz:g}"
         )
         print(
             f"[Drive] wheel_radius={self.cfg.wheel_radius:.4f}m "
@@ -503,7 +500,7 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._policy_lidar_sector_edges = hybrid_180_sector_edges(
                 device=self.device
             )
-            self._policy_lidar_sector_groups = ((45, 4), (90, 12), (45, 4))
+            self._policy_lidar_sector_groups = policy_sector_groups
             _sector_centers_rad = sector_centers_from_edges(
                 self._policy_lidar_sector_edges
             )
@@ -1756,7 +1753,7 @@ class EmmaObsNavEnv(DirectRLEnv):
         ang_vel_z_norm = robot.data.root_ang_vel_b[:, 2:3] / max(cfg.max_angular_velocity, 0.1)
 
         # ================================================================
-        # LiDAR — 1440 射线 @ 0.25° → min-pool → 120 扇区 (每 3°)
+        # LiDAR — configured raw rays -> uniform-120 or hybrid-180 policy sectors
         # ================================================================
         self._ensure_lidar_ready()
 
