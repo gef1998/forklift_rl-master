@@ -535,3 +535,76 @@ def warp_cached_ranges_and_clearances(
         valid,
         sector_edges,
     )
+
+
+def warp_cached_raw_ranges_and_clearances(
+    cached_ranges: torch.Tensor,
+    cached_pose: torch.Tensor,
+    current_pose: torch.Tensor,
+    ray_angles: torch.Tensor,
+    num_policy_sectors: int,
+    num_safety_sectors: int,
+    max_range: float,
+    half_length: float,
+    half_width: float,
+    sensor_offset_x: float,
+    sensor_offset_y: float,
+    sector_edges: torch.Tensor | None = None,
+    policy_valid_mask: torch.Tensor | None = None,
+    ray_directions: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Warp all physical returns once, then pool policy and safety separately.
+
+    Policy-only dropout masks source rays; the safety branch always retains
+    the physical scan. Invalid/no-return rays never create synthetic hits.
+    """
+    source = (ranges_to_points(cached_ranges, ray_angles) if ray_directions is None
+              else cached_ranges.unsqueeze(-1) * ray_directions)
+    # Work in relative coordinates: adding a large env origin to every return
+    # and subtracting it again loses precision in float32 at high env counts.
+    yaw = cached_pose[:, 2] - current_pose[:, 2]
+    c, s = torch.cos(yaw)[:, None], torch.sin(yaw)[:, None]
+    delta = cached_pose[:, :2] - current_pose[:, :2]
+    ct, st = torch.cos(current_pose[:, 2]), torch.sin(current_pose[:, 2])
+    tx = (delta[:, 0] * ct + delta[:, 1] * st)[:, None]
+    ty = (-delta[:, 0] * st + delta[:, 1] * ct)[:, None]
+    points = torch.stack((source[..., 0]*c-source[..., 1]*s+tx,
+                          source[..., 0]*s+source[..., 1]*c+ty), dim=-1)
+    ranges = torch.linalg.norm(points, dim=-1)
+    angles = torch.remainder(torch.atan2(points[..., 1], points[..., 0]), 2.0 * math.pi)
+    valid = (cached_ranges < max_range) & (ranges > 1.0e-6) & (ranges < max_range)
+    # Intersect the rectangle directly with Cartesian rays. This is the same
+    # radial footprint projection, without per-return sin/cos or a 4-way stack.
+    px, py = points[..., 0], points[..., 1]
+    x_edge = (half_length if sensor_offset_x == 0. else torch.where(
+        px >= 0., px.new_tensor(half_length-sensor_offset_x), px.new_tensor(half_length+sensor_offset_x)))
+    y_edge = (half_width if sensor_offset_y == 0. else torch.where(
+        py >= 0., py.new_tensor(half_width-sensor_offset_y), py.new_tensor(half_width+sensor_offset_y)))
+    projection = ranges * torch.minimum(x_edge / px.abs().clamp_min(1.e-12),
+                                         y_edge / py.abs().clamp_min(1.e-12))
+    clearance = ranges - projection
+
+    def aggregate(count, edges, mask, need_ranges):
+        indices = _sector_indices(angles, count, edges)
+        centers = ((torch.arange(count, device=angles.device, dtype=angles.dtype) + .5)
+                   * (2.0 * math.pi / count) if edges is None else
+                   sector_centers_from_edges(edges.to(device=angles.device, dtype=angles.dtype)))
+        default = max_range - rectangular_footprint_projection(
+            centers, half_length, half_width, sensor_offset_x, sensor_offset_y)
+        output = default.unsqueeze(0).repeat(ranges.shape[0], 1)
+        output.scatter_reduce_(1, indices, torch.where(mask, clearance, float("inf")),
+                               reduce="amin", include_self=True)
+        out_ranges = None
+        if need_ranges:
+            out_ranges = torch.full_like(output, max_range)
+            out_ranges.scatter_reduce_(1, indices, torch.where(mask, ranges, max_range),
+                                       reduce="amin", include_self=True)
+        return out_ranges, output
+
+    policy_valid = valid if policy_valid_mask is None else valid & policy_valid_mask
+    policy_ranges, policy_clearance = aggregate(num_policy_sectors, sector_edges, policy_valid, True)
+    if num_policy_sectors == num_safety_sectors and sector_edges is None and policy_valid_mask is None:
+        safety_clearance = policy_clearance
+    else:
+        _, safety_clearance = aggregate(num_safety_sectors, None, valid, False)
+    return policy_ranges, policy_clearance, safety_clearance

@@ -109,6 +109,10 @@ parser.add_argument(
     help="Number of env.step calls for --fixed-wheel-cmd (default: 150).",
 )
 parser.add_argument(
+    "--lidar-warp-before-pooling", action=argparse.BooleanOptionalAction, default=None,
+    help="Cache raw rays and pool after compensation; --no-lidar-warp-before-pooling restores the legacy cache.",
+)
+parser.add_argument(
     "--lidar-forward-half-fov-deg",
     "--lidar_forward_half_fov_deg",
     dest="lidar_forward_half_fov_deg",
@@ -635,6 +639,8 @@ def main():
     # and passes that key to the environment's first reset (otherwise seed=0).
     play_seed = set_seed(args_cli.seed)
     env_cfg.seed = play_seed
+    if args_cli.lidar_warp_before_pooling is not None:
+        env_cfg.lidar_warp_before_pooling = args_cli.lidar_warp_before_pooling
     if hasattr(env_cfg, "curriculum"):
         env_cfg.curriculum.enabled = False  # Fixed full-task evaluation, including multi-env play.
     print(f"[INFO] Playback/map seed: {play_seed} (reproduce with --seed {play_seed})", flush=True)

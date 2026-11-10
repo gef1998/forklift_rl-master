@@ -53,6 +53,8 @@ from .async_lidar import (
     sensor_due_mask,
     sinusoidal_aoi_encoding,
     warp_cached_ranges_and_clearances,
+    warp_cached_raw_ranges_and_clearances,
+    _sector_indices,
 )
 from .emma_obs_nav_corridor_world import CorridorWorldManager, spawn_s_corridor
 from .emma_obs_nav_env_cfg import EmmaObsNavEnvCfg
@@ -643,17 +645,28 @@ class EmmaObsNavEnv(DirectRLEnv):
             self.cfg.ground_static_friction >= self.cfg.ground_dynamic_friction >= 0.0
         ):
             raise ValueError("ground friction must satisfy static >= dynamic >= 0")
+        raw_cache = self.cfg.lidar_warp_before_pooling
+        cache_rays = self.cfg.num_lidar_rays if raw_cache else policy_sectors
         self._cached_scan_ranges = torch.full(
-            (self.num_envs, policy_sectors), self.cfg.lidar_max_distance,
+            (self.num_envs, cache_rays), self.cfg.lidar_max_distance,
             device=self.device)
-        self._cached_scan_angles = self._lidar_sector_angles.clone()
+        self._cached_scan_angles = (self._lidar_ray_angles if raw_cache
+                                    else self._lidar_sector_angles.clone())
+        self._raw_policy_sector_indices = (_sector_indices(
+            self._lidar_ray_angles[0], policy_sectors, self._policy_lidar_sector_edges)
+            if raw_cache else None)
+        self._raw_ray_directions = (torch.stack((torch.cos(self._lidar_ray_angles[0]),
+                                                 torch.sin(self._lidar_ray_angles[0])), dim=-1)
+                                    if raw_cache else None)
+        self._cached_policy_dropout = (torch.zeros(
+            self.num_envs, policy_sectors, dtype=torch.bool, device=self.device) if raw_cache else None)
         # Shield cache follows the same physical timing but is independent of
         # policy-only sector dropout. It therefore cannot interpret training
         # dropout as free space.
-        self._cached_shield_scan_ranges = torch.full(
+        self._cached_shield_scan_ranges = None if raw_cache else torch.full(
             (self.num_envs, shield_sectors), self.cfg.lidar_max_distance,
             device=self.device)
-        self._cached_shield_scan_angles = self._shield_lidar_sector_angles.clone()
+        self._cached_shield_scan_angles = None if raw_cache else self._shield_lidar_sector_angles.clone()
         self._cached_sensor_pose = torch.zeros(self.num_envs, 3, device=self.device)
         self._cached_timestamp = torch.zeros(self.num_envs, device=self.device)
         self._has_cached_scan = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -670,15 +683,18 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._lidar_aoi = torch.zeros(self.num_envs, device=self.device)
 
         self._pending_scan_ranges = torch.full(
-            (self.num_envs, queue_size, policy_sectors),
+            (self.num_envs, queue_size, cache_rays),
             self.cfg.lidar_max_distance, device=self.device)
-        self._pending_scan_angles = self._lidar_sector_angles.unsqueeze(1).repeat(
+        self._pending_scan_angles = None if raw_cache else self._lidar_sector_angles.unsqueeze(1).repeat(
             1, queue_size, 1)
-        self._pending_shield_scan_ranges = torch.full(
+        self._pending_shield_scan_ranges = None if raw_cache else torch.full(
             (self.num_envs, queue_size, shield_sectors), self.cfg.lidar_max_distance,
             device=self.device)
-        self._pending_shield_scan_angles = self._shield_lidar_sector_angles.unsqueeze(1).repeat(
+        self._pending_shield_scan_angles = None if raw_cache else self._shield_lidar_sector_angles.unsqueeze(1).repeat(
             1, queue_size, 1)
+        self._pending_policy_dropout = (torch.zeros(
+            self.num_envs, queue_size, policy_sectors, dtype=torch.bool, device=self.device)
+            if raw_cache else None)
         self._pending_sensor_pose = torch.zeros(
             self.num_envs, queue_size, 3, device=self.device)
         self._pending_generation_timestamp = torch.zeros(
@@ -1393,11 +1409,12 @@ class EmmaObsNavEnv(DirectRLEnv):
         # A reset invalidates both the delivered cache and all in-flight scans.
         self._has_cached_scan[env_ids] = False
         self._cached_scan_ranges[env_ids] = cfg.lidar_max_distance
-        self._cached_scan_angles[env_ids] = self._lidar_sector_angles[env_ids]
-        self._cached_shield_scan_ranges[env_ids] = cfg.lidar_max_distance
-        self._cached_shield_scan_angles[env_ids] = (
-            self._shield_lidar_sector_angles[env_ids]
-        )
+        if getattr(cfg, "lidar_warp_before_pooling", False):
+            self._cached_policy_dropout[env_ids] = False
+        else:
+            self._cached_scan_angles[env_ids] = self._lidar_sector_angles[env_ids]
+            self._cached_shield_scan_ranges[env_ids] = cfg.lidar_max_distance
+            self._cached_shield_scan_angles[env_ids] = self._shield_lidar_sector_angles[env_ids]
         self._cached_sensor_pose[env_ids] = 0.0
         self._cached_timestamp[env_ids] = current_time[env_ids]
         self._pending_valid[env_ids] = False
@@ -1479,15 +1496,8 @@ class EmmaObsNavEnv(DirectRLEnv):
         )
         return self._safety_clearance
 
-    def _capture_lidar_sector_ranges(
-        self, noise_scale: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Capture policy and shield sectors from the same physical scan.
-
-        Both branches see the same simulated range noise. Policy-only sector
-        dropout is applied after the shield copy is made.
-        """
-
+    def _capture_noisy_lidar_ranges(self, noise_scale: torch.Tensor) -> torch.Tensor:
+        """One physical scan and one noise realization for both branches."""
         cfg = self.cfg
         dr = cfg.domain_rand
         clean_ranges, valid = self._sample_clean_lidar_ranges()
@@ -1496,7 +1506,15 @@ class EmmaObsNavEnv(DirectRLEnv):
             noisy = raw_ranges + (
                 torch.randn_like(raw_ranges) * dr.lidar_noise_std * noise_scale[:, None])
             raw_ranges = torch.where(valid, noisy, raw_ranges)
-        raw_ranges = raw_ranges.clamp(min=0.0, max=cfg.lidar_max_distance)
+        return raw_ranges.clamp(min=0.0, max=cfg.lidar_max_distance)
+
+    def _capture_lidar_sector_ranges(
+        self, noise_scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Legacy contract: pool at capture time, then cache selected rays."""
+        cfg = self.cfg
+        dr = cfg.domain_rand
+        raw_ranges = self._capture_noisy_lidar_ranges(noise_scale)
 
         if cfg.lidar_policy_sector_layout == "hybrid_180":
             sector_ranges, sector_angles, _ = min_pool_clearance_rays_grouped(
@@ -1544,21 +1562,25 @@ class EmmaObsNavEnv(DirectRLEnv):
         self,
         env_ids: torch.Tensor,
         ranges: torch.Tensor,
-        ray_angles: torch.Tensor,
-        shield_ranges: torch.Tensor,
-        shield_ray_angles: torch.Tensor,
+        ray_angles: torch.Tensor | None,
+        shield_ranges: torch.Tensor | None,
+        shield_ray_angles: torch.Tensor | None,
         sensor_pose: torch.Tensor,
         generation_timestamp: torch.Tensor,
         delivery_timestamp: torch.Tensor,
+        policy_dropout: torch.Tensor | None = None,
     ) -> None:
         if len(env_ids) == 0:
             return
         queue_size = self._pending_scan_ranges.shape[1]
         slots = self._pending_write_index[env_ids] % queue_size
         self._pending_scan_ranges[env_ids, slots] = ranges[env_ids].clone()
-        self._pending_scan_angles[env_ids, slots] = ray_angles[env_ids].clone()
-        self._pending_shield_scan_ranges[env_ids, slots] = shield_ranges[env_ids].clone()
-        self._pending_shield_scan_angles[env_ids, slots] = shield_ray_angles[env_ids].clone()
+        if getattr(self.cfg, "lidar_warp_before_pooling", False):
+            self._pending_policy_dropout[env_ids, slots] = policy_dropout[env_ids]
+        else:
+            self._pending_scan_angles[env_ids, slots] = ray_angles[env_ids].clone()
+            self._pending_shield_scan_ranges[env_ids, slots] = shield_ranges[env_ids].clone()
+            self._pending_shield_scan_angles[env_ids, slots] = shield_ray_angles[env_ids].clone()
         self._pending_sensor_pose[env_ids, slots] = sensor_pose[env_ids].clone()
         self._pending_generation_timestamp[env_ids, slots] = generation_timestamp[env_ids]
         self._pending_delivery_timestamp[env_ids, slots] = delivery_timestamp[env_ids]
@@ -1582,13 +1604,12 @@ class EmmaObsNavEnv(DirectRLEnv):
         env_ids = torch.where(deliver_mask)[0]
         slots = latest_slot[env_ids]
         self._cached_scan_ranges[env_ids] = self._pending_scan_ranges[env_ids, slots].clone()
-        self._cached_scan_angles[env_ids] = self._pending_scan_angles[env_ids, slots].clone()
-        self._cached_shield_scan_ranges[env_ids] = (
-            self._pending_shield_scan_ranges[env_ids, slots].clone()
-        )
-        self._cached_shield_scan_angles[env_ids] = (
-            self._pending_shield_scan_angles[env_ids, slots].clone()
-        )
+        if getattr(self.cfg, "lidar_warp_before_pooling", False):
+            self._cached_policy_dropout[env_ids] = self._pending_policy_dropout[env_ids, slots]
+        else:
+            self._cached_scan_angles[env_ids] = self._pending_scan_angles[env_ids, slots].clone()
+            self._cached_shield_scan_ranges[env_ids] = self._pending_shield_scan_ranges[env_ids, slots].clone()
+            self._cached_shield_scan_angles[env_ids] = self._pending_shield_scan_angles[env_ids, slots].clone()
         self._cached_sensor_pose[env_ids] = self._pending_sensor_pose[env_ids, slots].clone()
         self._cached_timestamp[env_ids] = latest_timestamp[env_ids]
         self._has_cached_scan[env_ids] = True
@@ -1620,12 +1641,17 @@ class EmmaObsNavEnv(DirectRLEnv):
         self._last_sensor_generation_mask = generate_mask.clone()
 
         if torch.any(generate_mask):
-            (
-                captured_ranges,
-                captured_angles,
-                captured_shield_ranges,
-                captured_shield_angles,
-            ) = self._capture_lidar_sector_ranges(noise_scale)
+            policy_dropout = None
+            if getattr(cfg, "lidar_warp_before_pooling", False):
+                captured_ranges = self._capture_noisy_lidar_ranges(noise_scale)
+                captured_angles = captured_shield_ranges = captured_shield_angles = None
+                policy_dropout = torch.zeros_like(self._cached_policy_dropout)
+                if cfg.domain_rand.enable_lidar_dropout:
+                    probability = cfg.domain_rand.lidar_dropout_prob * noise_scale[:, None]
+                    policy_dropout = torch.rand_like(self._cached_policy_dropout, dtype=torch.float32) < probability
+            else:
+                (captured_ranges, captured_angles, captured_shield_ranges,
+                 captured_shield_angles) = self._capture_lidar_sector_ranges(noise_scale)
             accepted = generate_mask.clone()
             if cfg.lidar_sensor_mode.lower() != "synchronous" and cfg.lidar_scan_dropout_prob > 0:
                 scan_dropout = torch.rand(self.num_envs, device=self.device) < cfg.lidar_scan_dropout_prob * noise_scale
@@ -1645,6 +1671,7 @@ class EmmaObsNavEnv(DirectRLEnv):
                 current_sensor_pose,
                 current_time,
                 delivery_timestamp,
+                policy_dropout,
             )
 
             jitter_steps = torch.zeros(self.num_envs, device=self.device)
@@ -1667,19 +1694,21 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         self._last_sensor_delivery_mask = self._deliver_pending_lidar(current_time)
         target_pose = current_sensor_pose if cfg.lidar_warp_enabled else self._cached_sensor_pose
-        current_ranges, current_clearance = warp_cached_ranges_and_clearances(
-            self._cached_scan_ranges,
-            self._cached_sensor_pose,
-            target_pose,
-            self._cached_scan_angles,
-            cfg.lidar_output_sectors,
-            cfg.lidar_max_distance,
-            cfg.robot_half_length,
-            cfg.robot_half_width,
-            cfg.lidar_offset_x,
-            cfg.lidar_offset_y,
-            self._policy_lidar_sector_edges,
-        )
+        if getattr(cfg, "lidar_warp_before_pooling", False):
+            policy_valid = ~self._cached_policy_dropout[:, self._raw_policy_sector_indices]
+            current_ranges, current_clearance, shield_clearance = warp_cached_raw_ranges_and_clearances(
+                self._cached_scan_ranges, self._cached_sensor_pose, target_pose,
+                self._cached_scan_angles, cfg.lidar_output_sectors, cfg.lidar_safety_output_sectors,
+                cfg.lidar_max_distance, cfg.robot_half_length, cfg.robot_half_width,
+                cfg.lidar_offset_x, cfg.lidar_offset_y, self._policy_lidar_sector_edges,
+                policy_valid, self._raw_ray_directions)
+        else:
+            current_ranges, current_clearance = warp_cached_ranges_and_clearances(
+                self._cached_scan_ranges, self._cached_sensor_pose, target_pose,
+                self._cached_scan_angles, cfg.lidar_output_sectors, cfg.lidar_max_distance,
+                cfg.robot_half_length, cfg.robot_half_width, cfg.lidar_offset_x,
+                cfg.lidar_offset_y, self._policy_lidar_sector_edges,
+            )
         current_ranges = torch.where(
             self._has_cached_scan.unsqueeze(1),
             current_ranges,
@@ -1694,18 +1723,13 @@ class EmmaObsNavEnv(DirectRLEnv):
 
         # Warp the independently cached shield scan with exactly the same
         # delivered timestamp and sensor pose as the policy scan.
-        _, shield_clearance = warp_cached_ranges_and_clearances(
-            self._cached_shield_scan_ranges,
-            self._cached_sensor_pose,
-            target_pose,
-            self._cached_shield_scan_angles,
-            cfg.lidar_safety_output_sectors,
-            cfg.lidar_max_distance,
-            cfg.robot_half_length,
-            cfg.robot_half_width,
-            cfg.lidar_offset_x,
-            cfg.lidar_offset_y,
-        )
+        if not getattr(cfg, "lidar_warp_before_pooling", False):
+            _, shield_clearance = warp_cached_ranges_and_clearances(
+                self._cached_shield_scan_ranges, self._cached_sensor_pose, target_pose,
+                self._cached_shield_scan_angles, cfg.lidar_safety_output_sectors,
+                cfg.lidar_max_distance, cfg.robot_half_length, cfg.robot_half_width,
+                cfg.lidar_offset_x, cfg.lidar_offset_y,
+            )
         shield_default_clearance = (
             cfg.lidar_max_distance - self._shield_sector_rect_projection
         )

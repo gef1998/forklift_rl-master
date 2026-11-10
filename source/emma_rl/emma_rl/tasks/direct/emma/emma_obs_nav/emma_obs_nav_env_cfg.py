@@ -93,7 +93,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # ---- Environment ----
     decimation = 2
     # 早期策略速度较低，短墙绕行仍需留出探索和纠错时间。
-    episode_length_s = 60.0
+    episode_length_s = 50.0
     action_space = 2
     # Both modes consume signed actions in [-1, 1]^2:
     #   body_twist:    (normalized linear velocity, normalized angular velocity)
@@ -318,9 +318,9 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
             (1.8, 2.3),
             (1.4, 2.1),
             (1.25, 1.8),
-            (1.1, 1.7),
             (1.1, 1.6),
-            (0.8, 1.5),
+            (1.1, 1.5),
+            (0.8, 1.3),
         ),
         dedicated_detour_barrier_count_range=(3, 3),
         dedicated_detour_route_barrier_crossings=(2, 2, 3),
@@ -461,6 +461,9 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     lidar_scan_dropout_prob: float = 0.15                        # 15 % of scans silently dropped
     lidar_pending_queue_size: int = 16
     lidar_warp_enabled: bool = True
+    # Keep physical returns until ego-motion compensation, then form sectors.
+    # False restores the previous pooled-cache observation contract.
+    lidar_warp_before_pooling: bool = True
     lidar_aoi_enabled: bool = True
     lidar_aoi_encoding_scale_s: float = 0.3                      # longer encoding period for richer AoI
 
@@ -491,7 +494,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # ====================================================================
     # 有正负的目标进度、近障、动作变化、时间、到达和失败。
     goal_reach_bonus: float = 40.0
-    nav_failure_penalty: float = -30.0  # collision, fall or leaving the arena
+    nav_failure_penalty: float = -40.0  # collision, fall or leaving the arena
     collision_clearance_threshold: float = 0.010
     # Keep physical contacts and collision sensing enabled. At low curriculum
     # levels only mild-collision episode termination is relaxed.
@@ -543,7 +546,7 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # per-second cost outside it, so obstacle avoidance can depart from the line.
     reference_path_cross_track_tolerance: float = 0.0
     reference_path_cross_track_full_cost_error: float = 0.05
-    reference_path_cross_track_cost_per_second: float = 1.35
+    reference_path_cross_track_cost_per_second: float = 2
     # Signed progress rewards forward / penalizes backward travel. This weak
     # extra term suppresses lateral motion; it fades out around a stop/rotation.
     reference_path_velocity_direction_cost_per_second: float = 2.5  # 0 disables
@@ -553,13 +556,13 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.25
-    nav_proximity_cost_per_second: float = 0.15
+    nav_clearance_threshold: float = 0.3
+    nav_proximity_cost_per_second: float = 0.3
     nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.
     # Charged per command change; ignored on the first action of each episode.
-    nav_action_change_scale: float = 0.08
+    nav_action_change_scale: float = 0.1
 
 
     def __post_init__(self):
