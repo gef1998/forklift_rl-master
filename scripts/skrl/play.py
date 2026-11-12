@@ -112,6 +112,8 @@ parser.add_argument(
     "--lidar-warp-before-pooling", action=argparse.BooleanOptionalAction, default=None,
     help="Cache raw rays and pool after compensation; --no-lidar-warp-before-pooling restores the legacy cache.",
 )
+parser.add_argument("--observation-lidar-mode", choices=["dual","central"], default=None,
+                    help="Physical front/rear observation or legacy center scan; collision truth stays 360 degrees.")
 parser.add_argument(
     "--lidar-forward-half-fov-deg",
     "--lidar_forward_half_fov_deg",
@@ -641,6 +643,10 @@ def main():
     env_cfg.seed = play_seed
     if args_cli.lidar_warp_before_pooling is not None:
         env_cfg.lidar_warp_before_pooling = args_cli.lidar_warp_before_pooling
+    if args_cli.observation_lidar_mode is not None:
+        env_cfg.observation_lidar_mode = args_cli.observation_lidar_mode
+    elif args_cli.lidar_warp_before_pooling is False:
+        env_cfg.observation_lidar_mode = "central"
     if hasattr(env_cfg, "curriculum"):
         env_cfg.curriculum.enabled = False  # Fixed full-task evaluation, including multi-env play.
     print(f"[INFO] Playback/map seed: {play_seed} (reproduce with --seed {play_seed})", flush=True)

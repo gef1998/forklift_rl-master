@@ -1,0 +1,50 @@
+{
+  "mounts": {
+    "/scan_emma_nav_back": {
+      "angle_min_deg": -100.0000005060238, 
+      "frame": "laser_link2", 
+      "messages": 293, 
+      "native_angle_increment_deg": 0.2499999980634083, 
+      "native_rays": 800, 
+      "position_m": [
+        -0.38084093897583393, 
+        0.0038731886056669546, 
+        0.2
+      ], 
+      "range_max_m": 30.0, 
+      "range_min_m": 0.05000000074505806, 
+      "rpy_deg": [
+        0.0, 
+        -0.0, 
+        179.4984201459905
+      ], 
+      "sample_stride": 4, 
+      "sampled_angle_increment_deg": 0.9999999922536332, 
+      "sampled_rays": 200
+    }, 
+    "/scan_emma_nav_front": {
+      "angle_min_deg": -104.99999950679661, 
+      "frame": "laser_link", 
+      "messages": 522, 
+      "native_angle_increment_deg": 0.2499958092364564, 
+      "native_rays": 840, 
+      "position_m": [
+        0.364452970190296, 
+        -0.0006679106426595418, 
+        0.0
+      ], 
+      "range_max_m": 30.0, 
+      "range_min_m": 0.05000000074505806, 
+      "rpy_deg": [
+        0.0, 
+        0.0, 
+        -0.4816950391431737
+      ], 
+      "sample_stride": 2, 
+      "sampled_angle_increment_deg": 0.4999916184729128, 
+      "sampled_rays": 420
+    }
+  }, 
+  "reference_frame": "base_footprint", 
+  "source": "/lf/cross_arm64/rl_ws/src/mini_servo/2026-11-09-22-54-49.bag"
+}

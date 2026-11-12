@@ -28,6 +28,7 @@ from isaaclab.utils import configclass
 
 from ..asset_paths import resolve_asset
 from .async_lidar import lidar_sampling_layout
+from .dual_lidar import MountedLidarCfg, front_mount, back_mount
 from .emma_obs_nav_corridor_world import CorridorWorldConfig
 from .emma_obs_nav_random_obstacle_world import RandomObstacleWorldConfig
 from .emma_obs_nav_straight_obstacle_world import StraightObstacleWorldConfig
@@ -198,11 +199,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Command headroom for measured tracking overshoot (settled start/reversal).
     # Keep the hardware specifications above distinct from this calibration.
     linear_acceleration_command_scale: float = 0.90
-    angular_acceleration_command_scale: float = 0.80
+    angular_acceleration_command_scale: float = 0.70
 
     sync_body_velocity_limits_to_wheels: bool = False
     max_linear_velocity: float = 0.7
-    max_angular_velocity: float = 1.2
+    max_angular_velocity: float = 1.0
 
     # 车身占位 (矩形, 原点=几何中心, body +X=前)
     robot_half_length: float = 0.425        # 0.4115m physical half-length + safety margin
@@ -426,11 +427,18 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     safety_control: SafetyControlCfg = SafetyControlCfg()
 
     # ====================================================================
-    # LiDAR — 默认 0.5° / 720 射线，物理扫描保持 360°
-    #   horizontal_res 是唯一射线密度配置；下列计数由 configure_lidar_sampling 推导。
-    #   噪声加在原始距离上 (模拟传感器误差), min-pool 后再做 dropout
+    # LiDAR — 双激光观测与中心碰撞真值分离。
+    #   中心真值 horizontal_res=0.5° / 720 线，保持 360°，不进入双激光观测。
+    #   观测使用下方 front_lidar/back_lidar 的原生线数、角度及抽样步长。
+    #   原始距离加噪声；策略 dropout 不影响安全分支。
     # ====================================================================
     num_lidar_rays: int = 720                   # derived: 360° / horizontal_res
+    # The center scan remains clean 50-Hz collision/reward truth. Observation
+    # rays use the two physical mounts and are queried only at capture events.
+    observation_lidar_mode: str = "dual"  # "dual" or legacy "central"
+    front_lidar: MountedLidarCfg = front_mount()
+    back_lidar: MountedLidarCfg = back_mount()
+    num_observation_lidar_rays: int = 620
     # Policy sectors may use either uniform 3-degree pooling or the hybrid-180
     # layout. The policy-internal safety controller always retains an independent
     # uniform 120-sector scan so changing network resolution does not also change
@@ -441,11 +449,11 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     lidar_safety_output_sectors: int = 120
     lidar_safety_rays_per_sector: int = 6        # derived: 3° / horizontal_res
     lidar_max_distance: float = 20.0
-    lidar_height: float = 0.12                  # LiDAR 安装高度
+    lidar_height: float = 0.12                  # 中心真值扫描相对车体高度；双激光使用各自 position.z
     lidar_offset_x: float = 0.0               # 偏前 (body +X=前进方向)
     lidar_offset_y: float = 0.0
-    # 当前实车使用前向 220° 激光。训练、play、部署统一为 ±110°，
-    # 其余策略盲区填固定 clearance；物理扫描和碰撞检测仍保留 360°。
+    # 默认双激光使用全部方向。若改为 ±110°，仅对策略观测做固定盲区填充；
+    # 安全分支及独立碰撞真值不受策略 FOV 裁剪影响。
     lidar_observation_forward_half_fov_deg: float = 180.0
     lidar_observation_blind_fill_clearance: float = 1.0
     debug_lidar_fov_fill: bool = False
@@ -556,8 +564,8 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
     # Running costs use seconds, independent of the control frequency.
     # Clearance is measured OUTSIDE the rectangular body, on a current clean scan.
     # Only a narrow near-collision band is penalized, preserving usable corridors.
-    nav_clearance_threshold: float = 0.3
-    nav_proximity_cost_per_second: float = 0.3
+    nav_clearance_threshold: float = 0.2
+    nav_proximity_cost_per_second: float = 0.5
     nav_time_cost_per_second: float = 0.75
 
     # One weak regularizer on changes in raw normalized policy actions.
@@ -578,6 +586,14 @@ class EmmaObsNavEnvCfg(DirectRLEnvCfg):
         )
         self.lidar_rays_per_sector = rays_per_sector
         self.lidar_safety_rays_per_sector = rays_per_sector
+        self.observation_lidar_mode = self.observation_lidar_mode.strip().lower()
+        if self.observation_lidar_mode not in ("dual", "central"):
+            raise ValueError("observation_lidar_mode must be dual or central")
+        if self.observation_lidar_mode == "dual" and not self.lidar_warp_before_pooling:
+            raise ValueError("dual mounted LiDAR requires lidar_warp_before_pooling=True")
+        self.num_observation_lidar_rays = (
+            self.front_lidar.ray_count + self.back_lidar.ray_count
+            if self.observation_lidar_mode == "dual" else self.num_lidar_rays)
         return groups
 
 

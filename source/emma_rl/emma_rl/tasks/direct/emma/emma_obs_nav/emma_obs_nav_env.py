@@ -40,6 +40,9 @@ from .action_control import (
     project_wheel_velocities_to_motion_limits,
     wheel_velocities_to_body_twist,
 )
+from .dual_lidar import DualLidarObservation
+from isaaclab.utils.warp import raycast_mesh
+
 from .async_lidar import (
     advance_sensor_schedule,
     bpearl_planar_ray_angles,
@@ -297,6 +300,8 @@ class EmmaObsNavEnv(DirectRLEnv):
             f"policy_sectors={self.cfg.lidar_output_sectors} "
             f"safety_sectors={self.cfg.lidar_safety_output_sectors} "
             f"raw_rays={self.cfg.num_lidar_rays} "
+            f"observation_mode={self.cfg.observation_lidar_mode} "
+            f"observation_rays={self.cfg.num_observation_lidar_rays} "
             f"ray_res={self.cfg.lidar.pattern_cfg.horizontal_res:g}deg "
             f"sensor_mode={self.cfg.lidar_sensor_mode} "
             f"nominal_hz={self.cfg.lidar_fixed_frequency_hz:g}"
@@ -645,66 +650,95 @@ class EmmaObsNavEnv(DirectRLEnv):
             self.cfg.ground_static_friction >= self.cfg.ground_dynamic_friction >= 0.0
         ):
             raise ValueError("ground friction must satisfy static >= dynamic >= 0")
-        raw_cache = self.cfg.lidar_warp_before_pooling
-        cache_rays = self.cfg.num_lidar_rays if raw_cache else policy_sectors
-        self._cached_scan_ranges = torch.full(
-            (self.num_envs, cache_rays), self.cfg.lidar_max_distance,
-            device=self.device)
-        self._cached_scan_angles = (self._lidar_ray_angles if raw_cache
-                                    else self._lidar_sector_angles.clone())
-        self._raw_policy_sector_indices = (_sector_indices(
-            self._lidar_ray_angles[0], policy_sectors, self._policy_lidar_sector_edges)
-            if raw_cache else None)
-        self._raw_ray_directions = (torch.stack((torch.cos(self._lidar_ray_angles[0]),
-                                                 torch.sin(self._lidar_ray_angles[0])), dim=-1)
-                                    if raw_cache else None)
-        self._cached_policy_dropout = (torch.zeros(
-            self.num_envs, policy_sectors, dtype=torch.bool, device=self.device) if raw_cache else None)
-        # Shield cache follows the same physical timing but is independent of
-        # policy-only sector dropout. It therefore cannot interpret training
-        # dropout as free space.
-        self._cached_shield_scan_ranges = None if raw_cache else torch.full(
-            (self.num_envs, shield_sectors), self.cfg.lidar_max_distance,
-            device=self.device)
-        self._cached_shield_scan_angles = None if raw_cache else self._shield_lidar_sector_angles.clone()
-        self._cached_sensor_pose = torch.zeros(self.num_envs, 3, device=self.device)
-        self._cached_timestamp = torch.zeros(self.num_envs, device=self.device)
-        self._has_cached_scan = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        if self.cfg.observation_lidar_mode == "dual":
+            self._dual_lidar = DualLidarObservation(
+                self.num_envs, self.cfg, self.device, self._policy_lidar_sector_edges)
+            state = self._dual_lidar
+            self._cached_scan_ranges = state.ranges
+            self._cached_scan_angles = None
+            self._cached_shield_scan_ranges = self._cached_shield_scan_angles = None
+            self._cached_policy_dropout = None
+            self._raw_policy_sector_indices = None
+            self._raw_ray_directions = state.directions
+            self._cached_sensor_pose = state.poses[:, 0]
+            self._cached_timestamp = state.timestamp
+            self._has_cached_scan = state.has_cache
+            self._sensor_period = state.period[:, 0]
+            self._sensor_latency = state.latency[:, 0]
+            self._next_sensor_timestamp = state.next_capture[:, 0]
+            self._sensor_schedule_initialized = state.initialized
+            self._last_sensor_generation_mask = state.generated
+            self._last_sensor_delivery_mask = state.delivered
+            self._lidar_aoi = state.aoi
+            # No second central observation queue: retain only the two compact
+            # physical-source queues; the 360-degree center scan is truth only.
+            self._pending_scan_ranges = self._pending_scan_angles = None
+            self._pending_shield_scan_ranges = self._pending_shield_scan_angles = None
+            self._pending_policy_dropout = None
+            self._pending_sensor_pose = self._pending_generation_timestamp = None
+            self._pending_delivery_timestamp = self._pending_valid = self._pending_write_index = None
+        else:
+            self._dual_lidar = None
+            raw_cache = self.cfg.lidar_warp_before_pooling
+            cache_rays = self.cfg.num_lidar_rays if raw_cache else policy_sectors
+            self._cached_scan_ranges = torch.full(
+                (self.num_envs, cache_rays), self.cfg.lidar_max_distance,
+                device=self.device)
+            self._cached_scan_angles = (self._lidar_ray_angles if raw_cache
+                                        else self._lidar_sector_angles.clone())
+            self._raw_policy_sector_indices = (_sector_indices(
+                self._lidar_ray_angles[0], policy_sectors, self._policy_lidar_sector_edges)
+                if raw_cache else None)
+            self._raw_ray_directions = (torch.stack((torch.cos(self._lidar_ray_angles[0]),
+                                                     torch.sin(self._lidar_ray_angles[0])), dim=-1)
+                                        if raw_cache else None)
+            self._cached_policy_dropout = (torch.zeros(
+                self.num_envs, policy_sectors, dtype=torch.bool, device=self.device) if raw_cache else None)
+            # Shield cache follows the same physical timing but is independent of
+            # policy-only sector dropout. It therefore cannot interpret training
+            # dropout as free space.
+            self._cached_shield_scan_ranges = None if raw_cache else torch.full(
+                (self.num_envs, shield_sectors), self.cfg.lidar_max_distance,
+                device=self.device)
+            self._cached_shield_scan_angles = None if raw_cache else self._shield_lidar_sector_angles.clone()
+            self._cached_sensor_pose = torch.zeros(self.num_envs, 3, device=self.device)
+            self._cached_timestamp = torch.zeros(self.num_envs, device=self.device)
+            self._has_cached_scan = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
-        self._sensor_period = torch.full((self.num_envs,), self.step_dt, device=self.device)
-        self._sensor_latency = torch.zeros(self.num_envs, device=self.device)
-        self._next_sensor_timestamp = torch.zeros(self.num_envs, device=self.device)
-        self._sensor_schedule_initialized = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device)
-        self._last_sensor_generation_mask = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device)
-        self._last_sensor_delivery_mask = torch.zeros(
-            self.num_envs, dtype=torch.bool, device=self.device)
-        self._lidar_aoi = torch.zeros(self.num_envs, device=self.device)
+            self._sensor_period = torch.full((self.num_envs,), self.step_dt, device=self.device)
+            self._sensor_latency = torch.zeros(self.num_envs, device=self.device)
+            self._next_sensor_timestamp = torch.zeros(self.num_envs, device=self.device)
+            self._sensor_schedule_initialized = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device)
+            self._last_sensor_generation_mask = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device)
+            self._last_sensor_delivery_mask = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device)
+            self._lidar_aoi = torch.zeros(self.num_envs, device=self.device)
 
-        self._pending_scan_ranges = torch.full(
-            (self.num_envs, queue_size, cache_rays),
-            self.cfg.lidar_max_distance, device=self.device)
-        self._pending_scan_angles = None if raw_cache else self._lidar_sector_angles.unsqueeze(1).repeat(
-            1, queue_size, 1)
-        self._pending_shield_scan_ranges = None if raw_cache else torch.full(
-            (self.num_envs, queue_size, shield_sectors), self.cfg.lidar_max_distance,
-            device=self.device)
-        self._pending_shield_scan_angles = None if raw_cache else self._shield_lidar_sector_angles.unsqueeze(1).repeat(
-            1, queue_size, 1)
-        self._pending_policy_dropout = (torch.zeros(
-            self.num_envs, queue_size, policy_sectors, dtype=torch.bool, device=self.device)
-            if raw_cache else None)
-        self._pending_sensor_pose = torch.zeros(
-            self.num_envs, queue_size, 3, device=self.device)
-        self._pending_generation_timestamp = torch.zeros(
-            self.num_envs, queue_size, device=self.device)
-        self._pending_delivery_timestamp = torch.full(
-            (self.num_envs, queue_size), float("inf"), device=self.device)
-        self._pending_valid = torch.zeros(
-            self.num_envs, queue_size, dtype=torch.bool, device=self.device)
-        self._pending_write_index = torch.zeros(
-            self.num_envs, dtype=torch.long, device=self.device)
+            self._pending_scan_ranges = torch.full(
+                (self.num_envs, queue_size, cache_rays),
+                self.cfg.lidar_max_distance, device=self.device)
+            self._pending_scan_angles = None if raw_cache else self._lidar_sector_angles.unsqueeze(1).repeat(
+                1, queue_size, 1)
+            self._pending_shield_scan_ranges = None if raw_cache else torch.full(
+                (self.num_envs, queue_size, shield_sectors), self.cfg.lidar_max_distance,
+                device=self.device)
+            self._pending_shield_scan_angles = None if raw_cache else self._shield_lidar_sector_angles.unsqueeze(1).repeat(
+                1, queue_size, 1)
+            self._pending_policy_dropout = (torch.zeros(
+                self.num_envs, queue_size, policy_sectors, dtype=torch.bool, device=self.device)
+                if raw_cache else None)
+            self._pending_sensor_pose = torch.zeros(
+                self.num_envs, queue_size, 3, device=self.device)
+            self._pending_generation_timestamp = torch.zeros(
+                self.num_envs, queue_size, device=self.device)
+            self._pending_delivery_timestamp = torch.full(
+                (self.num_envs, queue_size), float("inf"), device=self.device)
+            self._pending_valid = torch.zeros(
+                self.num_envs, queue_size, dtype=torch.bool, device=self.device)
+            self._pending_write_index = torch.zeros(
+                self.num_envs, dtype=torch.long, device=self.device)
 
         # Separate delayed shield data from current reward/termination geometry.
         self._shield_clearance = torch.full(
@@ -1369,6 +1403,9 @@ class EmmaObsNavEnv(DirectRLEnv):
         """Sample independent sensor timing for the selected environments."""
         if len(env_ids) == 0:
             return
+        if getattr(self, "_dual_lidar", None) is not None:
+            self._dual_lidar.reset(env_ids, current_time, self._episode_noise_scale)
+            return
         cfg = self.cfg
         mode = cfg.lidar_sensor_mode.lower()
         n = len(env_ids)
@@ -1495,6 +1532,36 @@ class EmmaObsNavEnv(DirectRLEnv):
             self._safety_clearance.amin(dim=-1) <= cfg.collision_clearance_threshold
         )
         return self._safety_clearance
+
+    def _capture_dual_lidar_ranges(self, source_env_ids: list[torch.Tensor]) -> list[torch.Tensor]:
+        """One mesh, one batched query, and only the scheduled source/env rays.
+
+        The separate center scan remains the sole collision/reward truth.
+        Physical ranges are returned relative to their respective ray origins.
+        """
+        self._ensure_lidar_ready()
+        starts, directions, sizes = [], [], []
+        for source, env_ids in enumerate(source_env_ids):
+            count = self._dual_lidar.mounts[source].ray_count
+            sizes.append(len(env_ids)*count)
+            if not len(env_ids):
+                continue
+            local_starts, local_dirs = self._dual_lidar.geometry[source]
+            quat = self.robot.data.root_quat_w[env_ids, None, :].expand(-1,count,-1).reshape(-1,4)
+            pos = self.robot.data.root_pos_w[env_ids, None, :]
+            origin = math_utils.quat_apply(quat,local_starts[None].expand(len(env_ids),-1,-1).reshape(-1,3))
+            starts.append((origin.reshape(len(env_ids),count,3)+pos).reshape(-1,3))
+            directions.append(math_utils.quat_apply(quat,local_dirs[None].expand(len(env_ids),-1,-1).reshape(-1,3)))
+        if not starts:
+            return [torch.empty((0,m.ray_count),device=self.device) for m in self._dual_lidar.mounts]
+        mesh = self._lidar.meshes[self.cfg.lidar.mesh_prim_paths[0]]
+        # raycast_mesh's distance output expects two leading dimensions.
+        _, distance, _, _ = raycast_mesh(torch.cat(starts)[None],torch.cat(directions)[None],
+            mesh,max_dist=self.cfg.lidar_max_distance,return_distance=True)
+        distance = torch.where(torch.isfinite(distance[0]),distance[0],self.cfg.lidar_max_distance)
+        pieces = distance.split(sizes)
+        return [part.reshape(len(ids),mount.ray_count)
+                for part,ids,mount in zip(pieces,source_env_ids,self._dual_lidar.mounts)]
 
     def _capture_noisy_lidar_ranges(self, noise_scale: torch.Tensor) -> torch.Tensor:
         """One physical scan and one noise realization for both branches."""
@@ -1631,6 +1698,13 @@ class EmmaObsNavEnv(DirectRLEnv):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Generate, queue, deliver, and warp asynchronous LiDAR observations."""
         cfg = self.cfg
+        if getattr(self, "_dual_lidar", None) is not None:
+            ranges,aoi,clearance,shield = self._dual_lidar.step(
+                current_sensor_pose,current_time,noise_scale,self._capture_dual_lidar_ranges)
+            self._shield_clearance = shield
+            self._shield_aoi = aoi
+            self._lidar_aoi = aoi
+            return ranges,aoi,clearance
         uninitialized = ~self._sensor_schedule_initialized
         if torch.any(uninitialized):
             self._configure_lidar_schedule(torch.where(uninitialized)[0], current_time)
